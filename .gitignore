@@ -231,6 +231,5 @@ Thumbs.db
 
 # Development and testing
 hello.py
-test_*.py
 debug_*.py
 scratch/
