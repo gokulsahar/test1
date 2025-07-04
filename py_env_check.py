@@ -1,7 +1,7 @@
 pkgs = [
     "ruamel.yaml", "pydantic", "click", "networkx", "pandas", "numpy", "dask",
     "msgpack", "requests", "typing_extensions", "toolz", "cloudpickle",
-    "partd", "fsspec", "python_dateutil", "tzdata", "pytz", "jsonschema", "graphviz",
+    "partd", "fsspec", "python-dateutil", "tzdata", "pytz", "jsonschema", "graphviz",
     "pytest", "pytest_cov", "black", "isort", "mypy", "pre_commit",
 ]
 
