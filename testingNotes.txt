@@ -1,0 +1,51 @@
+1. Install Dev Dependencies
+If you haven’t already, create a requirements-dev.txt:
+
+
+pytest
+pytest-cov
+black
+isort
+mypy
+pre-commit
+Then run:
+
+
+
+
+pip install -r requirements-dev.txt
+2. Run Tests
+To run all tests (auto-discovers files like test_*.py):
+
+
+
+
+pytest
+3. Check Code Coverage
+To see coverage in terminal:
+
+
+
+
+pytest --cov=pype --cov-report=term
+To generate an HTML coverage report:
+
+
+
+
+pytest --cov=pype --cov-report=html
+Then open htmlcov/index.html in your browser to explore visually.
+
+4. Run Everything via Pre-commit (if configured)
+Once pre-commit is installed:
+
+
+
+
+pre-commit run --all-files
+
+latest try tox
+
+
+
+conda develop .

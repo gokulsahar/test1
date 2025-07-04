@@ -1,0 +1,69 @@
+To maintain consistent, high-quality code across the team, DataPY uses pre-commit hooks to automatically format, lint, and type-check your code before you commit.
+
+This ensures:
+
+All code is formatted with black
+
+Imports are clean and ordered using isort
+
+Type errors are caught early with mypy
+
+One-time Setup (Per Developer)
+You only need to do this once per machine/clone
+
+Install dev dependencies
+
+bash
+Copy
+Edit
+pip install -r requirements-dev.txt
+Install the pre-commit Git hook
+
+bash
+Copy
+Edit
+pre-commit install
+(Recommended) Run it once on the whole codebase
+
+bash
+Copy
+Edit
+pre-commit run --all-files
+This will auto-fix formatting issues and show type errors (if any).
+
+Hook Configuration: .pre-commit-config.yaml
+This file is committed in the repo and defines the exact tools and versions we use:
+
+yaml
+Copy
+Edit
+repos:
+  - repo: https://github.com/psf/black
+    rev: 24.3.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/pre-commit/mirrors-isort
+    rev: v5.12.0
+    hooks:
+      - id: isort
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.2.0
+    hooks:
+      - id: mypy
+ How It Works
+After setup:
+
+Every time you run git commit, the hooks will:
+
+Format your code (black)
+
+Sort your imports (isort)
+
+Check for typing errors (mypy)
+
+If any check fails, the commit is blocked with a helpful message.
+
+You can fix the issues and re-commit.
+

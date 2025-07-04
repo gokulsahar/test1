@@ -15,6 +15,8 @@ class ComponentRegistry:
             from pype.core.utils.constants import DB_PATH
             db_path = DB_PATH
         self.db_path = Path(db_path)
+        # Create directory if it doesn't exist
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
     
     #creates table if not already created
@@ -29,7 +31,7 @@ class ComponentRegistry:
                     description TEXT,
                     input_ports TEXT NOT NULL DEFAULT '[]',
                     output_ports TEXT NOT NULL DEFAULT '[]',
-                    required_params TEXT NOT NULL DEFAULT '[]',
+                    required_params TEXT NOT NULL DEFAULT '{}',
                     optional_params TEXT NOT NULL DEFAULT '{}',
                     output_globals TEXT NOT NULL DEFAULT '[]',
                     dependencies TEXT NOT NULL DEFAULT '[]',
@@ -73,7 +75,7 @@ class ComponentRegistry:
             'description': '',
             'input_ports': [],
             'output_ports': [],
-            'required_params': [],
+            'required_params': {},
             'optional_params': {},
             'output_globals': [],
             'dependencies': [],
@@ -145,7 +147,7 @@ class ComponentRegistry:
                 'description': row['description'],
                 'input_ports': self._deserialize_field(row['input_ports'], []),
                 'output_ports': self._deserialize_field(row['output_ports'], []),
-                'required_params': self._deserialize_field(row['required_params'], []),
+                'required_params': self._deserialize_field(row['required_params'], {}),
                 'optional_params': self._deserialize_field(row['optional_params'], {}),
                 'output_globals': self._deserialize_field(row['output_globals'], []),
                 'dependencies': self._deserialize_field(row['dependencies'], []),
@@ -173,7 +175,7 @@ class ComponentRegistry:
                     'description': row['description'],
                     'input_ports': self._deserialize_field(row['input_ports'], []),
                     'output_ports': self._deserialize_field(row['output_ports'], []),
-                    'required_params': self._deserialize_field(row['required_params'], []),
+                    'required_params': self._deserialize_field(row['required_params'], {}),
                     'optional_params': self._deserialize_field(row['optional_params'], {}),
                     'output_globals': self._deserialize_field(row['output_globals'], []),
                     'dependencies': self._deserialize_field(row['dependencies'], []),
@@ -189,7 +191,7 @@ class ComponentRegistry:
     
     # get comp metadata from .py
     def _extract_component_metadata(self, cls, class_name: str, module_path: str) -> Dict[str, Any]:
-        config_schema = getattr(cls, 'CONFIG_SCHEMA', {"required": [], "optional": {}})
+        config_schema = getattr(cls, 'CONFIG_SCHEMA', {"required": {}, "optional": {}})
         
         return {
             'name': getattr(cls, 'COMPONENT_NAME', class_name.lower()),
@@ -199,7 +201,7 @@ class ComponentRegistry:
             'description': getattr(cls, '__doc__', '').strip() if getattr(cls, '__doc__') else '',
             'input_ports': getattr(cls, 'INPUT_PORTS', []),
             'output_ports': getattr(cls, 'OUTPUT_PORTS', []),
-            'required_params': config_schema.get('required', []),
+            'required_params': config_schema.get('required', {}),
             'optional_params': config_schema.get('optional', {}),
             'output_globals': getattr(cls, 'OUTPUT_GLOBALS', []),
             'dependencies': getattr(cls, 'DEPENDENCIES', []),
