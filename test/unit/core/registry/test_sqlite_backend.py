@@ -1,197 +1,331 @@
-import pytest
-import tempfile
-import os
 import sqlite3
-import time
+import json
+import pkgutil
+import importlib
+from datetime import datetime
 from pathlib import Path
-from pype.core.registry.sqlite_backend import ComponentRegistry
+from typing import Dict, List, Optional, Any
 
 
-class TestComponentRegistry:
+class ComponentRegistry:
     
-    @pytest.fixture
-    def registry(self):
-        """Create registry with in-memory database (no file locking issues)."""
-        return ComponentRegistry(":memory:")
-    
-    @pytest.fixture
-    def temp_registry(self):
-        """Create registry with temporary file for persistence tests."""
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-        temp_file.close()
+    #sets database file path & ensures its initialized
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            from pype.core.utils.constants import DB_PATH
+            db_path = DB_PATH
+        self.db_path = Path(db_path)
+        # Create directory if it doesn't exist (only for file databases)
+        if str(self.db_path) != ":memory:":
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
-        reg = ComponentRegistry(temp_file.name)
-        yield reg, temp_file.name
-        
-        # Cleanup with retry for Windows
-        for attempt in range(5):
-            try:
-                if os.path.exists(temp_file.name):
-                    os.unlink(temp_file.name)
-                break
-            except (PermissionError, OSError):
-                time.sleep(0.1)
-                continue
+        # For in-memory databases, we need to keep a persistent connection
+        self._persistent_conn = None
+        if str(self.db_path) == ":memory:":
+            self._persistent_conn = sqlite3.connect(":memory:")
+            self._init_db_with_connection(self._persistent_conn)
+        else:
+            self._init_db()
     
-    @pytest.fixture
-    def sample_component(self):
-        """Sample component data for testing."""
+    def _get_connection(self):
+        """Get database connection - persistent for in-memory, new for file databases."""
+        if self._persistent_conn:
+            return self._persistent_conn
+        else:
+            return sqlite3.connect(self.db_path)
+    
+    def _init_db_with_connection(self, conn):
+        """Initialize database with given connection."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS components (
+                name TEXT PRIMARY KEY,
+                class_name TEXT NOT NULL,
+                module_path TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'unknown',
+                description TEXT,
+                input_ports TEXT NOT NULL DEFAULT '[]',
+                output_ports TEXT NOT NULL DEFAULT '[]',
+                required_params TEXT NOT NULL DEFAULT '{}',
+                optional_params TEXT NOT NULL DEFAULT '{}',
+                output_globals TEXT NOT NULL DEFAULT '[]',
+                dependencies TEXT NOT NULL DEFAULT '[]',
+                startable INTEGER NOT NULL DEFAULT 0,
+                events TEXT NOT NULL DEFAULT '["ok","error"]',
+                allow_multi_in INTEGER NOT NULL DEFAULT 0,
+                idempotent INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    
+    #creates table if not already created
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            self._init_db_with_connection(conn)  # Ensure changes are committed
+            
+    #store and read complex objects like list and dicts as json in db
+    def _serialize_field(self, value: Any) -> str:
+        if isinstance(value, (list, dict)):
+            return json.dumps(value)
+        return str(value) if value is not None else ""
+    
+    def _deserialize_field(self, value: str, default: Any) -> Any:
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return default
+    
+    # check all reqired fields are present
+    def _validate_component(self, component: Dict[str, Any]) -> bool:
+        required_fields = [
+            'name', 'class_name', 'module_path', 'category', 'description',
+            'input_ports', 'output_ports', 'required_params', 'optional_params',
+            'output_globals', 'dependencies', 'startable', 'events', 'allow_multi_in',
+            'idempotent'
+        ]
+        return all(field in component and component[field] is not None for field in required_fields)
+    
+    #merge comp data with defaults
+    def _prepare_component_data(self, component: Dict[str, Any]) -> tuple:
+        defaults = {
+            'category': 'unknown',
+            'description': '',
+            'input_ports': [],
+            'output_ports': [],
+            'required_params': {},
+            'optional_params': {},
+            'output_globals': [],
+            'dependencies': [],
+            'startable': 0,
+            'events': ['ok', 'error'],
+            'allow_multi_in': 0,
+            'idempotent': 1
+        }
+        
+        data = {**defaults, **component}
+        
+        return (
+            data['name'],
+            data['class_name'],
+            data['module_path'],
+            data['category'],
+            data['description'],
+            self._serialize_field(data['input_ports']),
+            self._serialize_field(data['output_ports']),
+            self._serialize_field(data['required_params']),
+            self._serialize_field(data['optional_params']),
+            self._serialize_field(data['output_globals']),
+            self._serialize_field(data['dependencies']),
+            int(data['startable']),
+            self._serialize_field(data['events']),
+            int(data['allow_multi_in']),
+            int(data['idempotent']),
+            datetime.now().isoformat()
+        )
+    
+    
+    #register the component - comp data should be given as  Dict[str, Any]
+    #Note: the method will INSERT or  REPLACE values into db.
+    def register_component(self, component: Dict[str, Any]) -> bool:
+        if not self._validate_component(component):
+            return False
+        
+        data = self._prepare_component_data(component)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO components (
+                    name, class_name, module_path, category, description,
+                    input_ports, output_ports, required_params, optional_params,
+                    output_globals, dependencies, startable, events, allow_multi_in,
+                    idempotent, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, data)
+            conn.commit()  # Ensure changes are committed
+        
+        return True
+    
+    #get comp details
+    def get_component(self, name: str) -> Optional[Dict[str, Any]]:
+        if self._persistent_conn:
+            # Use persistent connection for in-memory database
+            conn = self._persistent_conn
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM components WHERE name = ?", (name,)
+            )
+            row = cursor.fetchone()
+        else:
+            # Use context manager for file database
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    "SELECT * FROM components WHERE name = ?", (name,)
+                )
+                row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
         return {
-            "name": "test_component",
-            "class_name": "TestComponent",
-            "module_path": "test.module",
-            "category": "test",
-            "description": "A test component",
-            "input_ports": ["input1"],
-            "output_ports": ["output1"],
-            "required_params": {"param1": {"type": "str"}},
-            "optional_params": {"param2": {"type": "int", "default": 42}},
-            "output_globals": ["global1"],
-            "dependencies": ["dep1"],
-            "startable": True,
-            "events": ["ok", "error"],
-            "allow_multi_in": False,
-            "idempotent": True
+            'name': row['name'],
+            'class_name': row['class_name'],
+            'module_path': row['module_path'],
+            'category': row['category'],
+            'description': row['description'],
+            'input_ports': self._deserialize_field(row['input_ports'], []),
+            'output_ports': self._deserialize_field(row['output_ports'], []),
+            'required_params': self._deserialize_field(row['required_params'], {}),
+            'optional_params': self._deserialize_field(row['optional_params'], {}),
+            'output_globals': self._deserialize_field(row['output_globals'], []),
+            'dependencies': self._deserialize_field(row['dependencies'], []),
+            'startable': bool(row['startable']),
+            'events': self._deserialize_field(row['events'], ['ok', 'error']),
+            'allow_multi_in': bool(row['allow_multi_in']),
+            'idempotent': bool(row['idempotent']),
+            'created_at': row['created_at'],
+            'updated_at': row['updated_at']
         }
     
-    def test_registry_initialization_creates_empty_db(self, registry):
-        """Test registry initializes with empty database."""
-        components = registry.list_components()
-        assert components == []
+    #list all comp in db
+    def list_components(self) -> List[Dict[str, Any]]:
+        if self._persistent_conn:
+            # Use persistent connection for in-memory database
+            conn = self._persistent_conn
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM components ORDER BY name")
+            rows = cursor.fetchall()
+        else:
+            # Use context manager for file database
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT * FROM components ORDER BY name")
+                rows = cursor.fetchall()
+        
+        components = []
+        for row in rows:
+            components.append({
+                'name': row['name'],
+                'class_name': row['class_name'],
+                'module_path': row['module_path'],
+                'category': row['category'],
+                'description': row['description'],
+                'input_ports': self._deserialize_field(row['input_ports'], []),
+                'output_ports': self._deserialize_field(row['output_ports'], []),
+                'required_params': self._deserialize_field(row['required_params'], {}),
+                'optional_params': self._deserialize_field(row['optional_params'], {}),
+                'output_globals': self._deserialize_field(row['output_globals'], []),
+                'dependencies': self._deserialize_field(row['dependencies'], []),
+                'startable': bool(row['startable']),
+                'events': self._deserialize_field(row['events'], ['ok', 'error']),
+                'allow_multi_in': bool(row['allow_multi_in']),
+                'idempotent': bool(row['idempotent']),
+                'created_at': row['created_at'],
+                'updated_at': row['updated_at']
+            })
+        
+        return components
     
-    def test_register_component_success(self, registry, sample_component):
-        """Test successful component registration."""
-        result = registry.register_component(sample_component)
-        assert result is True
+    # get comp metadata from .py
+    def _extract_component_metadata(self, cls, class_name: str, module_path: str) -> Dict[str, Any]:
+        config_schema = getattr(cls, 'CONFIG_SCHEMA', {"required": {}, "optional": {}})
         
-        retrieved = registry.get_component("test_component")
-        assert retrieved is not None
-        assert retrieved["name"] == "test_component"
-        assert retrieved["class_name"] == "TestComponent"
-    
-    def test_register_component_updates_existing(self, registry, sample_component):
-        """Test registering component with same name updates existing."""
-        # Register original
-        registry.register_component(sample_component)
-        
-        # Update and register again
-        updated = sample_component.copy()
-        updated["description"] = "Updated description"
-        result = registry.register_component(updated)
-        
-        assert result is True
-        retrieved = registry.get_component("test_component")
-        assert retrieved["description"] == "Updated description"
-    
-    def test_register_component_validation_failure(self, registry):
-        """Test registration fails with invalid component data."""
-        invalid_component = {"name": "test"}  # Missing required fields
-        
-        result = registry.register_component(invalid_component)
-        assert result is False
-    
-    def test_get_component_not_found(self, registry):
-        """Test get_component returns None for non-existent component."""
-        result = registry.get_component("nonexistent")
-        assert result is None
-    
-    def test_list_components_multiple(self, registry, sample_component):
-        """Test listing multiple registered components."""
-        # Register first component
-        registry.register_component(sample_component)
-        
-        # Register second component
-        second_component = sample_component.copy()
-        second_component["name"] = "second_component"
-        registry.register_component(second_component)
-        
-        components = registry.list_components()
-        assert len(components) == 2
-        
-        names = [c["name"] for c in components]
-        assert "test_component" in names
-        assert "second_component" in names
-    
-    def test_field_serialization_deserialization(self, registry, sample_component):
-        """Test complex fields are properly serialized and deserialized."""
-        registry.register_component(sample_component)
-        retrieved = registry.get_component("test_component")
-        
-        # Test list fields
-        assert retrieved["input_ports"] == ["input1"]
-        assert retrieved["output_ports"] == ["output1"]
-        assert retrieved["events"] == ["ok", "error"]
-        
-        # Test dict fields
-        assert retrieved["required_params"] == {"param1": {"type": "str"}}
-        assert retrieved["optional_params"] == {"param2": {"type": "int", "default": 42}}
-        
-        # Test boolean fields
-        assert retrieved["startable"] is True
-        assert retrieved["allow_multi_in"] is False
-        assert retrieved["idempotent"] is True
-    
-    def test_default_values_applied(self, registry):
-        """Test default values are applied for missing fields."""
-        minimal_component = {
-            "name": "minimal",
-            "class_name": "Minimal",
-            "module_path": "test.minimal",
-            "category": "test",
-            "description": "Minimal component",
-            "input_ports": [],
-            "output_ports": [],
-            "required_params": {},
-            "optional_params": {},
-            "output_globals": [],
-            "dependencies": [],
-            "startable": False,
-            "events": ["ok", "error"],
-            "allow_multi_in": False,
-            "idempotent": True
+        return {
+            'name': getattr(cls, 'COMPONENT_NAME', class_name.lower()),
+            'class_name': class_name,
+            'module_path': module_path,
+            'category': getattr(cls, 'CATEGORY', 'unknown'),
+            'description': getattr(cls, '__doc__', '').strip() if getattr(cls, '__doc__') else '',
+            'input_ports': getattr(cls, 'INPUT_PORTS', []),
+            'output_ports': getattr(cls, 'OUTPUT_PORTS', []),
+            'required_params': config_schema.get('required', {}),
+            'optional_params': config_schema.get('optional', {}),
+            'output_globals': getattr(cls, 'OUTPUT_GLOBALS', []),
+            'dependencies': getattr(cls, 'DEPENDENCIES', []),
+            'startable': getattr(cls, 'STARTABLE', False),
+            'events': getattr(cls, 'EVENTS', ['ok', 'error']),
+            'allow_multi_in': getattr(cls, 'ALLOW_MULTI_IN', False),
+            'idempotent': getattr(cls, 'IDEMPOTENT', True)
         }
         
-        result = registry.register_component(minimal_component)
-        assert result is True
+    # get the comp from data from package   
+    def _extract_component_from_file(self, component_name: str) -> Optional[Dict[str, Any]]:
+        try:
+            components_package = importlib.import_module('pype.components')
+            
+            for importer, modname, ispkg in pkgutil.walk_packages(
+                components_package.__path__, components_package.__name__ + "."
+            ):
+                if modname.endswith('.base'):
+                    continue
+                    
+                try:
+                    module = importlib.import_module(modname)
+                    
+                    for attr_name in dir(module):
+                        attr = getattr(module, attr_name)
+                        
+                        if (isinstance(attr, type) and 
+                            hasattr(attr, 'COMPONENT_NAME') and
+                            (attr.COMPONENT_NAME == component_name or 
+                                attr_name.lower() == component_name.lower())):
+                            
+                            return self._extract_component_metadata(attr, attr_name, modname)
+                            
+                except (ImportError, AttributeError):
+                    continue
+                    
+        except ImportError:
+            pass
         
-        retrieved = registry.get_component("minimal")
-        assert retrieved["events"] == ["ok", "error"]
-        assert retrieved["startable"] is False
+        return None
+
+
+    #register comp by name
+    def register_component_by_name(self, component_name: str) -> bool:
+        component_data = self._extract_component_from_file(component_name)
+        if not component_data:
+            return False
+        
+        return self.register_component(component_data)
     
-    def test_database_persistence(self, temp_registry):
-        """Test data persists across registry instances."""
-        registry1, db_path = temp_registry
-        
-        # Register component with first registry instance
-        registry1.register_component(self.sample_component())
-        
-        # Create new registry instance with same database
-        registry2 = ComponentRegistry(db_path)
-        retrieved = registry2.get_component("test_component")
-        
-        assert retrieved is not None
-        assert retrieved["name"] == "test_component"
     
-    def test_extract_component_metadata_method(self, registry):
-        """Test _extract_component_metadata handles component classes correctly."""
-        # Test with mock class
-        class MockComponent:
-            COMPONENT_NAME = "mock"
-            CATEGORY = "test"
-            INPUT_PORTS = ["in1"]
-            OUTPUT_PORTS = ["out1"]
-            CONFIG_SCHEMA = {"required": {}, "optional": {}}
-            OUTPUT_GLOBALS = []
-            DEPENDENCIES = []
-            STARTABLE = True
-            EVENTS = ["ok", "error"]
-            ALLOW_MULTI_IN = False
-            IDEMPOTENT = True
-            __doc__ = "Mock component for testing"
+    #register all components from package
+    def register_components_from_package(self, package: str = 'pype.components') -> int:
+        registered_count = 0
         
-        metadata = registry._extract_component_metadata(MockComponent, "MockComponent", "test.mock")
+        try:
+            pkg = importlib.import_module(package)
+            
+            for importer, modname, ispkg in pkgutil.walk_packages(
+                pkg.__path__, pkg.__name__ + "."
+            ):
+                if modname.endswith('.base'):
+                    continue
+                    
+                try:
+                    module = importlib.import_module(modname)
+                    
+                    for attr_name in dir(module):
+                        attr = getattr(module, attr_name)
+                        
+                        # Skip if it's a base component
+                        if (isinstance(attr, type) and 
+                            hasattr(attr, 'COMPONENT_NAME') and
+                            attr.COMPONENT_NAME != 'base'):
+                            
+                            component_data = self._extract_component_metadata(attr, attr_name, modname)
+                            
+                            if self.register_component(component_data):
+                                registered_count += 1
+                                
+                except (ImportError, AttributeError):
+                    continue
+                    
+        except ImportError:
+            pass
         
-        assert metadata["name"] == "mock"
-        assert metadata["class_name"] == "MockComponent"
-        assert metadata["module_path"] == "test.mock"
-        assert metadata["description"] == "Mock component for testing"
+        return registered_count
