@@ -1,9 +1,7 @@
 pkgs = [
-    # runtime
     "ruamel.yaml", "pydantic", "click", "networkx", "pandas", "numpy", "dask",
     "msgpack", "requests", "typing_extensions", "toolz", "cloudpickle",
     "partd", "fsspec", "python_dateutil", "tzdata", "pytz", "jsonschema", "graphviz",
-    # dev / test
     "pytest", "pytest_cov", "black", "isort", "mypy", "pre_commit",
 ]
 
