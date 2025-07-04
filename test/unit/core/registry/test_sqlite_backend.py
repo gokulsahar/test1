@@ -1,6 +1,8 @@
 import pytest
 import tempfile
 import os
+import sqlite3
+import time
 from pathlib import Path
 from pype.core.registry.sqlite_backend import ComponentRegistry
 
@@ -8,18 +10,28 @@ from pype.core.registry.sqlite_backend import ComponentRegistry
 class TestComponentRegistry:
     
     @pytest.fixture
-    def temp_db(self):
-        """Create temporary database file."""
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-        temp_file.close()
-        yield temp_file.name
-        if os.path.exists(temp_file.name):
-            os.unlink(temp_file.name)
+    def registry(self):
+        """Create registry with in-memory database (no file locking issues)."""
+        return ComponentRegistry(":memory:")
     
     @pytest.fixture
-    def registry(self, temp_db):
-        """Create registry with temporary database."""
-        return ComponentRegistry(temp_db)
+    def temp_registry(self):
+        """Create registry with temporary file for persistence tests."""
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        temp_file.close()
+        
+        reg = ComponentRegistry(temp_file.name)
+        yield reg, temp_file.name
+        
+        # Cleanup with retry for Windows
+        for attempt in range(5):
+            try:
+                if os.path.exists(temp_file.name):
+                    os.unlink(temp_file.name)
+                break
+            except (PermissionError, OSError):
+                time.sleep(0.1)
+                continue
     
     @pytest.fixture
     def sample_component(self):
@@ -146,14 +158,15 @@ class TestComponentRegistry:
         assert retrieved["events"] == ["ok", "error"]
         assert retrieved["startable"] is False
     
-    def test_database_persistence(self, temp_db, sample_component):
+    def test_database_persistence(self, temp_registry):
         """Test data persists across registry instances."""
+        registry1, db_path = temp_registry
+        
         # Register component with first registry instance
-        registry1 = ComponentRegistry(temp_db)
-        registry1.register_component(sample_component)
+        registry1.register_component(self.sample_component())
         
         # Create new registry instance with same database
-        registry2 = ComponentRegistry(temp_db)
+        registry2 = ComponentRegistry(db_path)
         retrieved = registry2.get_component("test_component")
         
         assert retrieved is not None

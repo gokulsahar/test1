@@ -43,6 +43,7 @@ class ComponentRegistry:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            conn.commit()
             
     #store and read complex objects like list and dicts as json in db
     def _serialize_field(self, value: Any) -> str:
@@ -124,6 +125,7 @@ class ComponentRegistry:
                     idempotent, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
+            conn.commit()
         
         return True
     
