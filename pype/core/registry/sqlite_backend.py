@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any
 class ComponentRegistry:
     
     #sets database file path & ensures its initialized
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str = None):
         if db_path is None:
             from pype.core.utils.constants import DB_PATH
             db_path = DB_PATH
@@ -36,6 +36,7 @@ class ComponentRegistry:
                     startable INTEGER NOT NULL DEFAULT 0,
                     events TEXT NOT NULL DEFAULT '["ok","error"]',
                     allow_multi_in INTEGER NOT NULL DEFAULT 0,
+                    idempotent INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -60,7 +61,8 @@ class ComponentRegistry:
         required_fields = [
             'name', 'class_name', 'module_path', 'category', 'description',
             'input_ports', 'output_ports', 'required_params', 'optional_params',
-            'output_globals', 'dependencies', 'startable', 'events', 'allow_multi_in'
+            'output_globals', 'dependencies', 'startable', 'events', 'allow_multi_in',
+            'idempotent'
         ]
         return all(field in component and component[field] is not None for field in required_fields)
     
@@ -77,7 +79,8 @@ class ComponentRegistry:
             'dependencies': [],
             'startable': 0,
             'events': ['ok', 'error'],
-            'allow_multi_in': 0
+            'allow_multi_in': 0,
+            'idempotent': 1
         }
         
         data = {**defaults, **component}
@@ -97,6 +100,7 @@ class ComponentRegistry:
             int(data['startable']),
             self._serialize_field(data['events']),
             int(data['allow_multi_in']),
+            int(data['idempotent']),
             datetime.now().isoformat()
         )
     
@@ -115,8 +119,8 @@ class ComponentRegistry:
                     name, class_name, module_path, category, description,
                     input_ports, output_ports, required_params, optional_params,
                     output_globals, dependencies, startable, events, allow_multi_in,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    idempotent, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
         
         return True
@@ -148,6 +152,7 @@ class ComponentRegistry:
                 'startable': bool(row['startable']),
                 'events': self._deserialize_field(row['events'], ['ok', 'error']),
                 'allow_multi_in': bool(row['allow_multi_in']),
+                'idempotent': bool(row['idempotent']),
                 'created_at': row['created_at'],
                 'updated_at': row['updated_at']
             }
@@ -175,6 +180,7 @@ class ComponentRegistry:
                     'startable': bool(row['startable']),
                     'events': self._deserialize_field(row['events'], ['ok', 'error']),
                     'allow_multi_in': bool(row['allow_multi_in']),
+                    'idempotent': bool(row['idempotent']),
                     'created_at': row['created_at'],
                     'updated_at': row['updated_at']
                 })
@@ -199,7 +205,8 @@ class ComponentRegistry:
             'dependencies': getattr(cls, 'DEPENDENCIES', []),
             'startable': getattr(cls, 'STARTABLE', False),
             'events': getattr(cls, 'EVENTS', ['ok', 'error']),
-            'allow_multi_in': getattr(cls, 'ALLOW_MULTI_IN', False)
+            'allow_multi_in': getattr(cls, 'ALLOW_MULTI_IN', False),
+            'idempotent': getattr(cls, 'IDEMPOTENT', True)
         }
         
     # get the comp from data from package   
@@ -263,8 +270,10 @@ class ComponentRegistry:
                     for attr_name in dir(module):
                         attr = getattr(module, attr_name)
                         
+                        # Skip if it's a base component
                         if (isinstance(attr, type) and 
-                            hasattr(attr, 'COMPONENT_NAME')):
+                            hasattr(attr, 'COMPONENT_NAME') and
+                            attr.COMPONENT_NAME != 'base'):
                             
                             component_data = self._extract_component_metadata(attr, attr_name, modname)
                             
