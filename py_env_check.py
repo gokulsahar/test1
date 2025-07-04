@@ -16,3 +16,6 @@ if not missing:
     print("All DataPY packages present!")
 else:
     print("Missing:", ", ".join(missing))
+
+
+#conda install ruamel.yaml pydantic click networkx pandas numpy dask msgpack-python typing_extensions toolz cloudpickle partd fsspec python-dateutil tzdata pytz jsonschema graphviz  pytest pytest-cov black isort mypy pre-commit requests
