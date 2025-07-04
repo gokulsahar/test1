@@ -34,23 +34,37 @@ class BaseComponent(ABC):
         required = schema.get("required", {})
         optional = schema.get("optional", {})
         
+        #type mapping for data type checks for params
+        type_mapping = {
+            "str": str,
+            "int": int,
+            "float": float,
+            "bool": bool,
+            "list": list,
+            "dict": dict
+        }
+        
         # Check required parameters
         for param_name, param_spec in required.items():
             if param_name not in self.config:
                 raise ValueError(f"Missing required parameter: {param_name}")
             
             # Type checking for required parameters
-            expected_type = param_spec.get("type")
-            if expected_type and not isinstance(self.config[param_name], expected_type):
-                raise TypeError(f"Required parameter {param_name} must be of type {expected_type.__name__}")
+            expected_type_str = param_spec.get("type")
+            if expected_type_str and expected_type_str in type_mapping:
+                expected_type = type_mapping[expected_type_str]
+                if not isinstance(self.config[param_name], expected_type):
+                    raise TypeError(f"Required parameter {param_name} must be of type {expected_type_str}")
         
         # Validate optional parameter types
         for param_name, value in self.config.items():
             if param_name in optional:
                 param_spec = optional[param_name]
-                expected_type = param_spec.get("type")
-                if expected_type and not isinstance(value, expected_type):
-                    raise TypeError(f"Parameter {param_name} must be of type {expected_type.__name__}")
+                expected_type_str = param_spec.get("type")
+                if expected_type_str and expected_type_str in type_mapping:
+                    expected_type = type_mapping[expected_type_str]
+                    if not isinstance(value, expected_type):
+                        raise TypeError(f"Parameter {param_name} must be of type {expected_type_str}")
     
     @abstractmethod
     def execute(self, context: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
