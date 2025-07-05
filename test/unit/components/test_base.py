@@ -1,6 +1,7 @@
 import pytest
 from typing import Dict, Any
 from pype.components.base import BaseComponent
+from pype.core.engine.pipeline_data import PipelineData
 
 
 class ComponentForTesting(BaseComponent):
@@ -26,8 +27,13 @@ class ComponentForTesting(BaseComponent):
         }
     }
     
-    def execute(self, context: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
-        return {"output1": "test_result"}
+    def execute(self, context: Dict[str, Any], inputs: Dict[str, PipelineData]) -> Dict[str, PipelineData]:
+        return {
+            "output1": self._wrap_raw_data(
+                "test_result",
+                source=f"{self.name}_test_output"
+            )
+        }
 
 
 class TestBaseComponent:
@@ -139,3 +145,40 @@ class TestBaseComponent:
         assert str(component) == "ComponentForTesting(name=comp1)"
         assert "ComponentForTesting" in repr(component)
         assert "comp1" in repr(component)
+    
+    def test_pipeline_data_helper_methods(self):
+        """Test PipelineData helper methods."""
+        component = ComponentForTesting("comp1", {"name": "test"})
+        
+        # Test _wrap_raw_data
+        raw_data = {"test": "data"}
+        wrapped = component._wrap_raw_data(raw_data, "test_source")
+        
+        assert isinstance(wrapped, PipelineData)
+        assert wrapped.get_raw_data() == raw_data
+        assert wrapped.source == "test_source"
+        
+        # Test with default source
+        wrapped_default = component._wrap_raw_data(raw_data)
+        assert wrapped_default.source == "comp1_testable"
+        
+        # Test _extract_raw_data
+        extracted = component._extract_raw_data(wrapped)
+        assert extracted == raw_data
+    
+    def test_execute_returns_pipeline_data(self):
+        """Test execute method returns PipelineData objects."""
+        component = ComponentForTesting("comp1", {"name": "test"})
+        
+        # Create test inputs with PipelineData
+        inputs = {
+            "input1": PipelineData("test_input", source="upstream")
+        }
+        
+        result = component.execute({}, inputs)
+        
+        # Verify output structure
+        assert "output1" in result
+        assert isinstance(result["output1"], PipelineData)
+        assert result["output1"].get_raw_data() == "test_result"
+        assert result["output1"].source == "comp1_test_output"

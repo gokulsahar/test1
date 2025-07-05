@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union
+from pype.core.engine.pipeline_data import PipelineData
 
 
 class BaseComponent(ABC):
@@ -67,17 +68,45 @@ class BaseComponent(ABC):
                         raise TypeError(f"Parameter {param_name} must be of type {expected_type_str}")
     
     @abstractmethod
-    def execute(self, context: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the component logic.
+    def execute(self, context: Dict[str, Any], inputs: Dict[str, PipelineData]) -> Dict[str, PipelineData]:
+        """Execute the component logic with PipelineData contract.
         
         Args:
             context: Execution context with global variables and metadata
-            inputs: Input data from connected upstream components
+            inputs: Input PipelineData from connected upstream components
+                   Keys are port names, values are PipelineData instances
             
         Returns:
-            Dict with output data for downstream components
+            Dict with PipelineData outputs for downstream components
+            Keys are port names, values are PipelineData instances
         """
         pass
+    #getter and setter of pipelinedata
+    def _wrap_raw_data(self, data: Any, source: Optional[str] = None) -> PipelineData:
+        """Helper method to wrap raw data in PipelineData.
+        
+        Args:
+            data: Raw data to wrap
+            source: Optional source identifier
+            
+        Returns:
+            PipelineData instance
+        """
+        return PipelineData(
+            data=data,
+            source=source or f"{self.name}_{self.COMPONENT_NAME}"
+        )
+    
+    def _extract_raw_data(self, pipeline_data: PipelineData) -> Any:
+        """Helper method to extract raw data from PipelineData.
+        
+        Args:
+            pipeline_data: PipelineData instance
+            
+        Returns:
+            Raw underlying data
+        """
+        return pipeline_data.get_raw_data()
     
     #getters
     def get_name(self) -> str:

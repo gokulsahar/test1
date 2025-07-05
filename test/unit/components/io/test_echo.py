@@ -1,5 +1,7 @@
 import pytest
+import pandas as pd
 from pype.components.io.echo import EchoComponent
+from pype.core.engine.pipeline_data import PipelineData, DataType
 
 
 class TestEchoComponent:
@@ -43,75 +45,137 @@ class TestEchoComponent:
         with pytest.raises(TypeError, match="Parameter message must be of type str"):
             EchoComponent("echo1", {"message": 123})
     
-    def test_execute_passthrough_single_input(self):
-        """Test execute passes through single input unchanged."""
+    def test_execute_passthrough_pandas_data(self):
+        """Test execute passes through pandas DataFrame unchanged."""
         component = EchoComponent("echo1")
-        inputs = {"main": {"data": "test_data", "value": 42}}
+        
+        # Create test DataFrame
+        test_df = pd.DataFrame({"col1": [1, 2, 3], "col2": ["a", "b", "c"]})
+        pipeline_data = PipelineData(test_df, source="test_source")
+        inputs = {"main": pipeline_data}
         
         result = component.execute({}, inputs)
-        assert result == inputs
+        
+        # Verify output structure
+        assert "main" in result
+        assert isinstance(result["main"], PipelineData)
+        
+        # Verify data content is preserved
+        output_df = result["main"].to_pandas()
+        pd.testing.assert_frame_equal(output_df, test_df)
+        
+        # Verify metadata is updated
+        assert result["main"].source == "echo1_echo_passthrough"
+    
+    def test_execute_passthrough_scalar_data(self):
+        """Test execute passes through scalar data unchanged."""
+        component = EchoComponent("echo1")
+        
+        scalar_data = PipelineData(42, source="test_scalar")
+        inputs = {"main": scalar_data}
+        
+        result = component.execute({}, inputs)
+        
+        assert "main" in result
+        assert isinstance(result["main"], PipelineData)
+        assert result["main"].get_raw_data() == 42
+        assert result["main"].data_type == DataType.SCALAR
+    
+    def test_execute_passthrough_collection_data(self):
+        """Test execute passes through collection data unchanged."""
+        component = EchoComponent("echo1")
+        
+        test_list = [1, 2, 3, {"key": "value"}]
+        collection_data = PipelineData(test_list, source="test_collection")
+        inputs = {"main": collection_data}
+        
+        result = component.execute({}, inputs)
+        
+        assert "main" in result
+        assert isinstance(result["main"], PipelineData)
+        assert result["main"].get_raw_data() == test_list
+        assert result["main"].data_type == DataType.COLLECTION
     
     def test_execute_passthrough_multiple_inputs(self):
         """Test execute passes through multiple inputs unchanged."""
         component = EchoComponent("echo1")
+        
         inputs = {
-            "main": {"data": "main_data"},
-            "other": {"data": "other_data"}
+            "main": PipelineData({"data": "main_data"}, source="main_source"),
+            "other": PipelineData({"data": "other_data"}, source="other_source")
         }
         
         result = component.execute({}, inputs)
-        assert result == inputs
+        
+        assert len(result) == 2
+        assert "main" in result
+        assert "other" in result
+        
+        # Verify both outputs are PipelineData
+        for port_name, output_data in result.items():
+            assert isinstance(output_data, PipelineData)
+            assert output_data.source == "echo1_echo_passthrough"
     
     def test_execute_no_inputs_creates_main_none(self):
         """Test execute with no inputs creates main output with None."""
         component = EchoComponent("echo1")
         
         result = component.execute({}, {})
-        assert result == {"main": None}
+        
+        assert "main" in result
+        assert isinstance(result["main"], PipelineData)
+        assert result["main"].get_raw_data() is None
+        assert result["main"].data_type == DataType.SCALAR
+        assert result["main"].source == "echo1_echo_empty"
     
-    def test_execute_preserves_data_types(self):
-        """Test execute preserves all Python data types."""
+    def test_execute_preserves_pipeline_data_metadata(self):
+        """Test execute preserves PipelineData metadata."""
         component = EchoComponent("echo1")
-        inputs = {
-            "main": {
-                "string": "text",
-                "integer": 42,
-                "float": 3.14,
-                "boolean": True,
-                "list": [1, 2, 3],
-                "dict": {"nested": "value"},
-                "none": None
-            }
-        }
+        
+        # Create PipelineData with rich metadata
+        test_df = pd.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"]})
+        pipeline_data = PipelineData(
+            test_df,
+            schema={"id": "int64", "name": "object"},
+            source="upstream_component",
+            notes="Test data with metadata"
+        )
+        inputs = {"main": pipeline_data}
         
         result = component.execute({}, inputs)
-        assert result == inputs
-        # Verify types are preserved
-        main_data = result["main"]
-        assert isinstance(main_data["string"], str)
-        assert isinstance(main_data["integer"], int)
-        assert isinstance(main_data["float"], float)
-        assert isinstance(main_data["boolean"], bool)
-        assert isinstance(main_data["list"], list)
-        assert isinstance(main_data["dict"], dict)
-        assert main_data["none"] is None
+        
+        output_data = result["main"]
+        assert output_data.schema == {"id": "int64", "name": "object"}
+        assert output_data.notes == "Test data with metadata"
+        assert output_data.row_count == 2
+        # Source should be updated by echo component
+        assert output_data.source == "echo1_echo_passthrough"
     
     def test_execute_with_context(self):
         """Test execute works with context (context is ignored)."""
         component = EchoComponent("echo1")
         context = {"global_var": "global_value"}
-        inputs = {"main": {"data": "test"}}
+        
+        test_data = PipelineData("test", source="test")
+        inputs = {"main": test_data}
         
         result = component.execute(context, inputs)
-        assert result == inputs
+        
+        assert "main" in result
+        assert isinstance(result["main"], PipelineData)
+        assert result["main"].get_raw_data() == "test"
     
     def test_execute_with_message_config(self):
         """Test execute with message configuration (message is ignored in execution)."""
         component = EchoComponent("echo1", {"message": "Processing data"})
-        inputs = {"main": {"value": 123}}
+        
+        test_data = PipelineData(123, source="test")
+        inputs = {"main": test_data}
         
         result = component.execute({}, inputs)
-        assert result == inputs
+        
+        assert "main" in result
+        assert result["main"].get_raw_data() == 123
     
     def test_get_metadata(self):
         """Test get_metadata returns correct component metadata."""
@@ -137,3 +201,18 @@ class TestEchoComponent:
         assert component.is_startable() is True
         assert component.allows_multi_input() is False
         assert component.is_idempotent() is True
+        
+    def test_helper_methods(self):
+        """Test BaseComponent helper methods work correctly."""
+        component = EchoComponent("echo1")
+        
+        # Test _wrap_raw_data
+        raw_data = {"test": "data"}
+        wrapped = component._wrap_raw_data(raw_data, "test_source")
+        assert isinstance(wrapped, PipelineData)
+        assert wrapped.get_raw_data() == raw_data
+        assert wrapped.source == "test_source"
+        
+        # Test _extract_raw_data
+        extracted = component._extract_raw_data(wrapped)
+        assert extracted == raw_data

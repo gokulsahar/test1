@@ -1,9 +1,10 @@
-from typing import Any, Dict
+from typing import Dict
 from pype.components.base import BaseComponent
+from pype.core.engine.pipeline_data import PipelineData
 
 
 class EchoComponent(BaseComponent):
-   """Echo component that passes through all input data unchanged."""
+   """Echo component that passes through all input data unchanged using PipelineData contract."""
    
    COMPONENT_NAME = "echo"
    CATEGORY = "io"
@@ -27,15 +28,15 @@ class EchoComponent(BaseComponent):
        }
    }
    
-   def execute(self, context: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
+   def execute(self, context: Dict[str, any], inputs: Dict[str, PipelineData]) -> Dict[str, PipelineData]:
        """Execute the echo component by passing through all inputs unchanged.
        
        Args:
            context: Execution context with global variables and metadata
-           inputs: Input data from connected upstream components
+           inputs: Input PipelineData from connected upstream components
            
        Returns:
-           Dict with the same data as inputs for downstream components
+           Dict with the same PipelineData as inputs for downstream components
        """
        # Optional message logging could be handled by orchestrator
        message = self.config.get("message", "")
@@ -45,11 +46,18 @@ class EchoComponent(BaseComponent):
        
        # Pass through all inputs unchanged
        outputs = {}
-       for port_name, data in inputs.items():
-           outputs[port_name] = data
+       for port_name, pipeline_data in inputs.items():
+           # Clone the PipelineData with updated source information
+           outputs[port_name] = pipeline_data.clone_with_data(
+               pipeline_data.get_raw_data(),
+               source=f"{self.name}_echo_passthrough"
+           )
        
-       # If no inputs provided, create empty main output
+       # If no inputs provided, create empty main output with None
        if not outputs and "main" in self.OUTPUT_PORTS:
-           outputs["main"] = None
+           outputs["main"] = self._wrap_raw_data(
+               None, 
+               source=f"{self.name}_echo_empty"
+           )
            
        return outputs

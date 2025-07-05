@@ -15,9 +15,9 @@ dependencies = [
     "pydantic",
     "click",
     "networkx", 
-    "pandas",
+    "pandas>=2.0.0",     # Updated for better compatibility with PipelineData
     "numpy",
-    "dask",
+    "dask[complete]>=2023.1.0",  # Updated for complete dask functionality
     "msgpack",
     "requests",
     "typing_extensions",
