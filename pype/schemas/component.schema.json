@@ -1,0 +1,97 @@
+{
+ "type": "object",
+ "required": [
+   "name",
+   "class_name",
+   "module_path",
+   "category",
+   "input_ports",
+   "output_ports",
+   "required_params",
+   "optional_params",
+   "output_globals",
+   "dependencies",
+   "startable",
+   "events",
+   "allow_multi_in"
+ ],
+ "additionalProperties": false,
+ "properties": {
+   "name": {
+     "type": "string"
+   },
+   "class_name": {
+     "type": "string"
+   },
+   "module_path": {
+     "type": "string"
+   },
+   "category": {
+     "type": "string"
+   },
+   "input_ports": {
+     "type": "array",
+     "items": {
+       "type": "string"
+     },
+     "default": []
+   },
+   "output_ports": {
+     "type": "array",
+     "items": {
+       "type": "string"
+     },
+     "default": []
+   },
+   "required_params": {
+     "type": "array",
+     "items": {
+       "type": "string"
+     },
+     "default": []
+   },
+   "optional_params": {
+     "type": "object",
+     "default": {}
+   },
+   "output_globals": {
+     "type": "array",
+     "items": {
+       "type": "string"
+     },
+     "default": []
+   },
+   "dependencies": {
+     "type": "array",
+     "items": {
+       "type": "string"
+     },
+     "default": []
+   },
+   "startable": {
+     "type": "boolean",
+     "default": false
+   },
+   "events": {
+     "type": "array",
+     "items": {
+       "type": "string"
+     },
+     "minItems": 1
+   },
+   "allow_multi_in": {
+     "type": "boolean",
+     "default": false
+   },
+   "version": {
+     "type": "string"
+   },
+   "idempotent": {
+     "type": "boolean",
+     "default": true
+   },
+   "description": {
+     "type": "string"
+   }
+ }
+}
