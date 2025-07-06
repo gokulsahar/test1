@@ -11,24 +11,24 @@ class JobConfigModel(BaseModel):
     """Pydantic model for job configuration."""
     retries: int = Field(default=1, ge=0, le=10)
     timeout: int = Field(default=3600, ge=1)
-    fail_strategy: str = Field(default="halt", regex="^(halt|continue)$")
+    fail_strategy: str = Field(default="halt")
     dask_config: Optional[Dict[str, Any]] = None
 
 
 class JobMetadataModel(BaseModel):
     """Pydantic model for job metadata."""
-    name: str = Field(regex=r"^[a-zA-Z][a-zA-Z0-9_-]*$", max_length=128)
+    name: str = Field(max_length=128)
     desc: Optional[str] = Field(default="", max_length=512)
-    version: str = Field(regex=r"^\d+\.\d+\.\d+$")
-    team: str = Field(regex=r"^[a-zA-Z][a-zA-Z0-9_-]*$")
-    owner: str = Field(regex=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-    created: str = Field(regex=r"^\d{4}-\d{2}-\d{2}$")
+    version: str
+    team: str
+    owner: str
+    created: str
 
 
 class ComponentModel(BaseModel):
     """Pydantic model for component definition."""
-    name: str = Field(regex=r"^[a-zA-Z][a-zA-Z0-9]*$", max_length=64)
-    type: str = Field(regex=r"^[a-zA-Z][a-zA-Z0-9_]*$")
+    name: str = Field(max_length=64)
+    type: str
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -109,7 +109,7 @@ def load_job_yaml(file_path: Path, context: Optional[Dict[str, Any]] = None) -> 
     except Exception as e:
         raise LoaderError(f"Job model validation failed: {e}")
 
-
+#for tests or apis
 def load_job_from_dict(job_data: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> JobModel:
     """
     Load job from dictionary data with validation.

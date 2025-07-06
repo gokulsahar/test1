@@ -5,7 +5,6 @@ DB_PATH = str(Path(__file__).resolve().parents[2] / "sql_db" / "components.db")
 
 # Schema file names
 JOB_SCHEMA_FILE = "job.schema.json"
-COMPONENT_SCHEMA_FILE = "component.schema.json"
 
 # Build artifact configuration
 PJOB_EXTENSION = ".pjob"

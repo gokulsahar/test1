@@ -6,7 +6,6 @@ import jsonschema
 from jsonschema import ValidationError as JsonSchemaValidationError
 from pype.core.utils.constants import (
     JOB_SCHEMA_FILE,
-    COMPONENT_SCHEMA_FILE,
     GLOBAL_VAR_PATTERN,
     GLOBAL_VAR_DELIMITER,
     DEFAULT_ENCODING
@@ -60,23 +59,6 @@ def validate_job_schema(job_data: Dict[str, Any]) -> List[str]:
     try:
         schema = load_schema(JOB_SCHEMA_FILE)
         jsonschema.validate(job_data, schema)
-        return []
-    except JsonSchemaValidationError as e:
-        return [format_validation_error(e)]
-    except ValidationError as e:
-        return [str(e)]
-    except Exception as e:
-        return [f"Unexpected validation error: {e}"]
-
-
-def validate_component_schema(component_data: Dict[str, Any]) -> List[str]:
-    """Validate component dictionary against component.schema.json."""
-    if not isinstance(component_data, dict):
-        return ["Component data must be a dictionary"]
-    
-    try:
-        schema = load_schema(COMPONENT_SCHEMA_FILE)
-        jsonschema.validate(component_data, schema)
         return []
     except JsonSchemaValidationError as e:
         return [format_validation_error(e)]
