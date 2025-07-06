@@ -12,8 +12,8 @@ SECRET_VAR_PATTERN = r'\{\{\s*secret\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
 GLOBAL_VAR_PATTERN = rf'\{{\{{\s*([a-zA-Z_][a-zA-Z0-9_]*){GLOBAL_VAR_DELIMITER}([a-zA-Z_][a-zA-Z0-9_]*)\s*\}}\}}'
 
 # Component naming patterns
-COMPONENT_NAME_PATTERN = r'^[a-zA-Z_][a-zA-Z0-9_]*$'
-PORT_NAME_PATTERN = r'^[a-zA-Z_][a-zA-Z0-9_]*$'
+COMPONENT_NAME_PATTERN = r'^[a-zA-Z][a-zA-Z0-9]*$'
+PORT_NAME_PATTERN = r'^[a-zA-Z][a-zA-Z0-9]*$'
 
 # Connection syntax patterns
 DATA_CONNECTION_PATTERN = r'^(.+?)\.(.+?)\s*->\s*(.+?)\.(.+?)$'
