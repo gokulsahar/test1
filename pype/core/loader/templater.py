@@ -1,12 +1,9 @@
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict
 from pype.core.utils.constants import (
-    GLOBAL_VAR_DELIMITER, 
     CONTEXT_VAR_PATTERN, 
     SECRET_VAR_PATTERN, 
-    GLOBAL_VAR_PATTERN,
-    COMPONENT_NAME_PATTERN,
-    DEFAULT_ENCODING
+    GLOBAL_VAR_PATTERN
 )
 
 
@@ -33,6 +30,11 @@ def resolve_template_string(template: str, context: Dict[str, Any]) -> str:
         if re.search(SECRET_VAR_PATTERN, resolved):
             raise NotImplementedError("Secret resolution via CyberArk not yet implemented")
         
+        # Check for unresolved global variables (should be resolved at runtime)
+        if re.search(GLOBAL_VAR_PATTERN, resolved):
+            # Global variables are resolved at runtime, not compile time
+            pass
+        
         return resolved
         
     except re.error as e:
@@ -52,15 +54,12 @@ def resolve_template_dict(data: Any, context: Dict[str, Any]) -> Any:
 
 
 def resolve_template_yaml(yaml_data: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-    """Main function to resolve all templates in job YAML."""
+    """Main function to resolve all context templates in job YAML."""
     if not isinstance(yaml_data, dict):
         raise TemplateError("YAML data must be a dictionary")
     
     if not isinstance(context, dict):
         raise TemplateError("Context must be a dictionary")
-    
-    if "job" not in yaml_data:
-        raise TemplateError("YAML data missing required 'job' section")
     
     try:
         return resolve_template_dict(yaml_data, context)
@@ -68,64 +67,3 @@ def resolve_template_yaml(yaml_data: Dict[str, Any], context: Dict[str, Any]) ->
         raise
     except Exception as e:
         raise TemplateError(f"Unexpected error during template resolution: {e}")
-
-
-def validate_template_syntax(template: str) -> List[str]:
-    """Validate template syntax and return list of errors."""
-    errors = []
-    
-    if not isinstance(template, str):
-        return errors
-    
-    # Find all placeholder patterns
-    all_placeholders = re.findall(r'\{\{[^}]+\}\}', template)
-    
-    for placeholder in all_placeholders:
-        # Check if placeholder matches any valid pattern from constants
-        if not (re.match(CONTEXT_VAR_PATTERN, placeholder) or 
-                re.match(SECRET_VAR_PATTERN, placeholder) or
-                re.match(GLOBAL_VAR_PATTERN, placeholder)):
-            errors.append(f"Invalid template syntax: {placeholder}")
-    
-    return errors
-
-
-def validate_global_variables(yaml_data: Dict[str, Any]) -> List[str]:
-    """Validate global variable usage in templates."""
-    errors = []
-    
-    # Get component names from YAML
-    components = yaml_data.get("components", [])
-    component_names = set()
-    for comp in components:
-        comp_name = comp.get("name")
-        if comp_name:
-            # Validate component name follows naming pattern
-            if not re.match(COMPONENT_NAME_PATTERN, comp_name):
-                errors.append(f"Component name '{comp_name}' does not follow naming pattern (alphanumeric only)")
-            else:
-                component_names.add(comp_name)
-    
-    # Find all global variable references using constants
-    yaml_str = str(yaml_data)
-    global_vars = re.findall(GLOBAL_VAR_PATTERN, yaml_str)
-    
-    for comp_name, var_name in global_vars:
-        if comp_name not in component_names:
-            errors.append(f"Global variable references unknown component '{comp_name}' in '{{{{{comp_name}{GLOBAL_VAR_DELIMITER}{var_name}}}}}'")
-    
-    return errors
-
-
-def validate_all_templates(yaml_data: Dict[str, Any]) -> List[str]:
-    """Validate all template syntax in YAML data."""
-    errors = []
-    
-    # Validate template syntax
-    yaml_str = str(yaml_data)
-    errors.extend(validate_template_syntax(yaml_str))
-    
-    # Validate global variables
-    errors.extend(validate_global_variables(yaml_data))
-    
-    return errors
