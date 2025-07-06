@@ -61,13 +61,59 @@ class ComponentRegistry:
     
     # check all reqired fields are present
     def _validate_component(self, component: Dict[str, Any]) -> bool:
+        """component validation with field type and format checking."""
         required_fields = [
             'name', 'class_name', 'module_path', 'category', 'description',
             'input_ports', 'output_ports', 'required_params', 'optional_params',
             'output_globals', 'dependencies', 'startable', 'events', 'allow_multi_in',
             'idempotent'
         ]
-        return all(field in component and component[field] is not None for field in required_fields)
+        
+        # Check required fields exist and are not None
+        if not all(field in component and component[field] is not None for field in required_fields):
+            return False
+        
+        # Type and format validation
+        try:
+            # String fields with pattern validation
+            import re
+            name_pattern = r'^[a-zA-Z][a-zA-Z0-9_]*$'
+            if not re.match(name_pattern, component['name']):
+                return False
+            if not re.match(name_pattern, component['class_name']):
+                return False
+            if not isinstance(component['module_path'], str) or not component['module_path']:
+                return False
+            if not isinstance(component['category'], str) or not component['category']:
+                return False
+            if not isinstance(component['description'], str):
+                return False
+            
+            # List fields
+            for list_field in ['input_ports', 'output_ports', 'output_globals', 'dependencies', 'events']:
+                if not isinstance(component[list_field], list):
+                    return False
+            
+            # Dict fields
+            for dict_field in ['required_params', 'optional_params']:
+                if not isinstance(component[dict_field], dict):
+                    return False
+            
+            # Boolean fields
+            for bool_field in ['startable', 'allow_multi_in', 'idempotent']:
+                if not isinstance(component[bool_field], bool):
+                    return False
+            
+            # Events must not be empty and contain valid event types
+            valid_events = {'ok', 'error', 'parallelize', 'synchronise', 'subjob_ok', 'subjob_error'}
+            events = component['events']
+            if not events or not all(event in valid_events or event.startswith('if') for event in events):
+                return False
+            
+            return True
+            
+        except (TypeError, KeyError, AttributeError):
+            return False
     
     #merge comp data with defaults
     def _prepare_component_data(self, component: Dict[str, Any]) -> tuple:
