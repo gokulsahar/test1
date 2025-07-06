@@ -8,6 +8,7 @@ from pype.core.utils.constants import (
     JOB_SCHEMA_FILE,
     COMPONENT_SCHEMA_FILE,
     GLOBAL_VAR_PATTERN,
+    GLOBAL_VAR_DELIMITER,
     DEFAULT_ENCODING
 )
 
@@ -99,7 +100,7 @@ def validate_global_variable_references(job_data: Dict[str, Any]) -> List[str]:
     
     for comp_name, var_name in global_vars:
         if comp_name not in component_names:
-            errors.append(f"Global variable '{{{{comp_name}}__{var_name}}}' references unknown component '{comp_name}'")
+            errors.append(f"Global variable '{{{{{comp_name}{GLOBAL_VAR_DELIMITER}{var_name}}}}}' references unknown component '{comp_name}'")
     
     return errors
 

@@ -33,6 +33,7 @@ ENGINE_VERSION = "0.0.1"
 FRAMEWORK_NAME = "DataPY"
 
 # Template patterns (for resolution only, validation now in schema)
+GLOBAL_VAR_DELIMITER = "__"
 CONTEXT_VAR_PATTERN = r'\{\{\s*context\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
 SECRET_VAR_PATTERN = r'\{\{\s*secret\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
-GLOBAL_VAR_PATTERN = r'\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)__([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
+GLOBAL_VAR_PATTERN = rf'\{{\{{\s*([a-zA-Z_][a-zA-Z0-9_]*){GLOBAL_VAR_DELIMITER}([a-zA-Z_][a-zA-Z0-9_]*)\s*\}}\}}'
