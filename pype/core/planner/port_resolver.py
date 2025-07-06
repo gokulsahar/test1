@@ -1,6 +1,6 @@
 import re
 import networkx as nx
-from typing import Dict, List, Tuple, Any, Optional, Set
+from typing import Dict, List, Tuple, Any, Optional
 from pype.core.registry.component_registry import ComponentRegistry
 
 
@@ -271,6 +271,138 @@ class PortResolver:
         # Allow alphanumeric characters and underscores
         pattern = r'^[a-zA-Z0-9_]+$'
         return bool(re.match(pattern, port_name))
+    
+    def _is_wildcard_port(self, port_name: str) -> bool:
+        """Check if port name is a wildcard pattern."""
+        return port_name.endswith('*')
+    
+    def _extract_wildcard_prefix(self, port_name: str) -> Optional[str]:
+        """Extract prefix from wildcard port name."""
+        if self._is_wildcard_port(port_name):
+            return port_name[:-1]  # Remove the '*'
+        return None
+        return bool(re.match(pattern, port_name))
+    
+    def _validate_port_name_syntax(self, port_name: str, component_info: Dict[str, Any], 
+                                 port_type: str) -> List[str]:
+        """Validate port name syntax including wildcard patterns."""
+        errors = []
+        
+        # Basic format validation
+        if not self._validate_port_name_format(port_name):
+            errors.append(f"Invalid port name format: '{port_name}' (use alphanumeric + underscore)")
+            return errors
+        
+        # Check if this port should match a wildcard pattern
+        port_list_key = f"{port_type}_ports"
+        valid_ports = component_info.get(port_list_key, [])
+        
+        for valid_port in valid_ports:
+            if self._is_wildcard_port(valid_port):
+                prefix = self._extract_wildcard_prefix(valid_port)
+                if prefix and port_name.startswith(prefix):
+                    # This is a wildcard port, validate syntax
+                    if not self._validate_wildcard_port_syntax(port_name, valid_port):
+                        errors.append(
+                            f"Wildcard port '{port_name}' must follow pattern '{valid_port}' "
+                            f"(requires underscore: {prefix}_suffix)"
+                        )
+                    break
+        
+        return errors
+    
+    def _validate_wildcard_port_syntax(self, port_name: str, wildcard_pattern: str) -> bool:
+        """Validate wildcard port follows required underscore syntax."""
+        prefix = self._extract_wildcard_prefix(wildcard_pattern)
+        if not prefix:
+            return True  # Not a wildcard
+        
+        # Must be prefix_suffix (requires underscore)
+        expected_pattern = f"^{re.escape(prefix)}_[a-zA-Z0-9_]+$"
+        return bool(re.match(expected_pattern, port_name))
+    
+    def _track_port_connection(self, port_connections: Dict, component_name: str, 
+                             port_name: str, port_type: str) -> None:
+        """Track port connections for duplicate validation."""
+        if component_name not in port_connections:
+            port_connections[component_name] = {'input': {}, 'output': {}}
+        
+        if port_name not in port_connections[component_name][port_type]:
+            port_connections[component_name][port_type][port_name] = 0
+        
+        port_connections[component_name][port_type][port_name] += 1
+    
+    def _validate_connection_constraints(self, dag: nx.DiGraph, 
+                                       port_connections: Dict) -> List[str]:
+        """Validate connection constraints (multi-input, non-wildcard rules)."""
+        errors = []
+        
+        for component_name, connections in port_connections.items():
+            component_info = self._get_component_port_info(dag, component_name)
+            if not component_info:
+                continue
+            
+            # Validate input connections only
+            for port_name, count in connections['input'].items():
+                if count > 1:  # Multiple connections to same input port
+                    is_wildcard = self._is_wildcard_used(port_name, component_info['input_ports'])
+                    
+                    if not is_wildcard:
+                        # Non-wildcard ports cannot have multiple connections
+                        errors.append(
+                            f"Non-wildcard input port '{component_name}.{port_name}' "
+                            f"cannot have multiple connections ({count} found)"
+                        )
+                    elif not component_info.get('allow_multi_in', False):
+                        # Wildcard ports need allow_multi_in=True for multiple connections
+                        errors.append(
+                            f"Wildcard input port '{component_name}.{port_name}' has {count} "
+                            f"connections but component has allow_multi_in=False"
+                        )
+            
+            # Note: Output connections (fan-out) are always allowed for both wildcard and non-wildcard ports
+        
+        return errors
+    
+    def _is_wildcard_used(self, port_name: str, valid_ports: List[str]) -> bool:
+        """Check if port name is being used as a wildcard expansion."""
+        for valid_port in valid_ports:
+            if self._is_wildcard_port(valid_port):
+                prefix = self._extract_wildcard_prefix(valid_port)
+                if prefix and port_name.startswith(prefix):
+                    return True
+        return False
+    
+    def _identify_merge_requirements(self, dag: nx.DiGraph) -> Dict[str, Dict[str, str]]:
+        """Identify which ports need data merging for engine preparation."""
+        merge_requirements = {}
+        
+        # Count connections to each input port
+        input_counts = {}
+        for source, target, edge_data in dag.edges(data=True):
+            if edge_data.get('edge_type') == 'data':
+                target_port = edge_data.get('target_port')
+                key = f"{target}.{target_port}"
+                
+                if key not in input_counts:
+                    input_counts[key] = 0
+                input_counts[key] += 1
+        
+        # Mark ports that need merging
+        for key, count in input_counts.items():
+            if count > 1:
+                component_name, port_name = key.split('.', 1)
+                component_info = self._get_component_port_info(dag, component_name)
+                
+                if (component_info and 
+                    component_info.get('allow_multi_in', False) and
+                    self._is_wildcard_used(port_name, component_info['input_ports'])):
+                    
+                    if component_name not in merge_requirements:
+                        merge_requirements[component_name] = {}
+                    merge_requirements[component_name][port_name] = 'merge_required'
+        
+        return merge_requirements
     
     def _is_wildcard_port(self, port_name: str) -> bool:
         """Check if port name is a wildcard pattern."""
