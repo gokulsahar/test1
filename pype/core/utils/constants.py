@@ -36,3 +36,9 @@ GLOBAL_VAR_DELIMITER = "__"
 CONTEXT_VAR_PATTERN = r'\{\{\s*context\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
 SECRET_VAR_PATTERN = r'\{\{\s*secret\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
 GLOBAL_VAR_PATTERN = rf'\{{\{{\s*([a-zA-Z_][a-zA-Z0-9_]*){GLOBAL_VAR_DELIMITER}([a-zA-Z_][a-zA-Z0-9_]*)\s*\}}\}}'
+
+
+
+
+JOBLET_ROOT = Path(__file__).resolve().parents[3] / "joblets"
+JOBLET_EXTENSION = ".joblet.yaml"
