@@ -13,7 +13,6 @@ class EchoComponent(BaseComponent):
    OUTPUT_GLOBALS = []
    DEPENDENCIES = []
    STARTABLE = True
-   EVENTS = ["ok", "error"]
    ALLOW_MULTI_IN = False
    IDEMPOTENT = True
    

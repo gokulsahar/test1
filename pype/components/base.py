@@ -14,7 +14,6 @@ class BaseComponent(ABC):
     OUTPUT_GLOBALS: List[str] = []
     DEPENDENCIES: List[str] = []
     STARTABLE: bool = False
-    EVENTS: List[str] = ["ok", "error"]
     ALLOW_MULTI_IN: bool = False
     IDEMPOTENT: bool = True
     
@@ -145,10 +144,6 @@ class BaseComponent(ABC):
         """Get list of component dependencies."""
         return self.DEPENDENCIES.copy()
     
-    def get_events(self) -> List[str]:
-        """Get list of event names this component can emit."""
-        return self.EVENTS.copy()
-    
     def get_config_schema(self) -> Dict[str, Any]:
         """Get component configuration schema."""
         return {
@@ -184,7 +179,6 @@ class BaseComponent(ABC):
             "output_globals": cls.OUTPUT_GLOBALS,
             "dependencies": cls.DEPENDENCIES,
             "startable": cls.STARTABLE,
-            "events": cls.EVENTS,
             "allow_multi_in": cls.ALLOW_MULTI_IN,
             "idempotent": cls.IDEMPOTENT
         }
