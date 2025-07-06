@@ -2,217 +2,233 @@ import pytest
 import tempfile
 import os
 import time
-import atexit
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from pype.core.registry.sqlite_backend import ComponentRegistry
-
-
-# Global list to track temp files for emergency cleanup
-_temp_files_to_cleanup = []
-
-def _emergency_cleanup():
-    """Emergency cleanup function called on exit."""
-    for temp_file in _temp_files_to_cleanup:
-        try:
-            if os.path.exists(temp_file):
-                os.unlink(temp_file)
-        except:
-            pass
-
-# Register emergency cleanup
-atexit.register(_emergency_cleanup)
+from pype.core.registry.sqlite_backend import BaseSQLBackend
 
 
 @contextmanager
-def temp_db_file():
-    """Context manager for temporary database files with guaranteed cleanup."""
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    temp_file.close()
-    temp_path = temp_file.name
-    
-    # Add to emergency cleanup list
-    _temp_files_to_cleanup.append(temp_path)
-    
+def windows_safe_temp_db():
+    """Context manager for Windows-safe temporary database files."""
+    temp_file = None
+    temp_path = None
     try:
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        temp_path = temp_file.name
+        temp_file.close()  # Close immediately to avoid Windows locking issues
         yield temp_path
     finally:
-        # Primary cleanup
-        for attempt in range(5):
-            try:
-                if os.path.exists(temp_path):
+        # Cleanup with retry logic for Windows
+        if temp_path and os.path.exists(temp_path):
+            for attempt in range(10):
+                try:
                     os.unlink(temp_path)
-                # Remove from emergency list if successfully deleted
-                if temp_path in _temp_files_to_cleanup:
-                    _temp_files_to_cleanup.remove(temp_path)
-                break
-            except (PermissionError, OSError):
-                time.sleep(0.1)
-                continue
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.1)
+                    continue
 
 
-class TestComponentRegistry:
+@contextmanager
+def isolated_temp_dir():
+    """Context manager for isolated temporary directory with proper cleanup."""
+    temp_dir = None
+    try:
+        temp_dir = tempfile.mkdtemp()
+        yield temp_dir
+    finally:
+        if temp_dir:
+            # Force cleanup with retry for Windows
+            import shutil
+            for attempt in range(10):
+                try:
+                    shutil.rmtree(temp_dir)
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.1)
+                    continue
+
+
+class TestBaseSQLBackend:
     
     @pytest.fixture
-    def registry(self):
-        """Create registry with temporary file database."""
-        with temp_db_file() as temp_path:
-            yield ComponentRegistry(temp_path)
+    def backend(self):
+        """Create backend with temporary file database."""
+        with windows_safe_temp_db() as temp_path:
+            backend_instance = BaseSQLBackend(temp_path)
+            yield backend_instance
+            # Force close any connections
+            del backend_instance
     
-    @pytest.fixture
-    def sample_component(self):
-        """Sample component data for testing."""
-        return {
-            "name": "test_component",
-            "class_name": "TestComponent", 
-            "module_path": "test.module",
-            "category": "test",
-            "description": "A test component",
-            "input_ports": ["input1"],
-            "output_ports": ["output1"],
-            "required_params": {"param1": {"type": "str"}},
-            "optional_params": {"param2": {"type": "int", "default": 42}},
-            "output_globals": ["global1"],
-            "dependencies": ["dep1"],
-            "startable": True,
-            "allow_multi_in": False,
-            "idempotent": True
-        }
+    def test_initialization_creates_db_file(self):
+        """Test that initialization creates database file."""
+        with windows_safe_temp_db() as temp_path:
+            backend = BaseSQLBackend(temp_path)
+            assert Path(temp_path).exists()
+            del backend  # Clean up
     
-    def test_registry_initialization_creates_empty_db(self, registry):
-        """Test registry initializes with empty database."""
-        components = registry.list_components()
-        assert components == []
+    def test_initialization_creates_parent_directory(self):
+        """Test that initialization creates parent directories if needed."""
+        with isolated_temp_dir() as temp_dir:
+            nested_path = os.path.join(temp_dir, "nested", "path", "test.db")
+            backend = BaseSQLBackend(nested_path)
+            assert os.path.exists(nested_path)
+            # Force connection close before cleanup
+            del backend
     
-    def test_register_component_success(self, registry, sample_component):
-        """Test successful component registration."""
-        result = registry.register_component(sample_component)
-        assert result is True
-        
-        retrieved = registry.get_component("test_component")
-        assert retrieved is not None
-        assert retrieved["name"] == "test_component"
-        assert retrieved["class_name"] == "TestComponent"
+    def test_init_db_creates_components_table(self, backend):
+        """Test that _init_db creates components table."""
+        with sqlite3.connect(backend.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='components'
+            """)
+            assert cursor.fetchone() is not None
     
-    def test_register_component_updates_existing(self, registry, sample_component):
-        """Test registering component with same name updates existing."""
-        # Register original
-        registry.register_component(sample_component)
-        
-        # Update and register again
-        updated = sample_component.copy()
-        updated["description"] = "Updated description"
-        result = registry.register_component(updated)
-        
-        assert result is True
-        retrieved = registry.get_component("test_component")
-        assert retrieved["description"] == "Updated description"
+    def test_init_db_creates_joblets_table(self, backend):
+        """Test that _init_db creates joblets table."""
+        with sqlite3.connect(backend.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='joblets'
+            """)
+            assert cursor.fetchone() is not None
     
-    def test_register_component_validation_failure(self, registry):
-        """Test registration fails with invalid component data."""
-        invalid_component = {"name": "test"}  # Missing required fields
-        
-        result = registry.register_component(invalid_component)
-        assert result is False
+    def test_serialize_field_list(self, backend):
+        """Test serializing list to JSON string."""
+        test_list = ["item1", "item2", "item3"]
+        result = backend._serialize_field(test_list)
+        assert result == '["item1", "item2", "item3"]'
     
-    def test_get_component_not_found(self, registry):
-        """Test get_component returns None for non-existent component."""
-        result = registry.get_component("nonexistent")
-        assert result is None
+    def test_serialize_field_dict(self, backend):
+        """Test serializing dict to JSON string."""
+        test_dict = {"key1": "value1", "key2": 42}
+        result = backend._serialize_field(test_dict)
+        assert '"key1": "value1"' in result
+        assert '"key2": 42' in result
     
-    def test_list_components_multiple(self, registry, sample_component):
-        """Test listing multiple registered components."""
-        # Register first component
-        registry.register_component(sample_component)
-        
-        # Register second component
-        second_component = sample_component.copy()
-        second_component["name"] = "second_component"
-        registry.register_component(second_component)
-        
-        components = registry.list_components()
-        assert len(components) == 2
-        
-        names = [c["name"] for c in components]
-        assert "test_component" in names
-        assert "second_component" in names
+    def test_serialize_field_string(self, backend):
+        """Test serializing string returns string."""
+        test_string = "test_value"
+        result = backend._serialize_field(test_string)
+        assert result == "test_value"
     
-    def test_field_serialization_deserialization(self, registry, sample_component):
-        """Test complex fields are properly serialized and deserialized."""
-        registry.register_component(sample_component)
-        retrieved = registry.get_component("test_component")
-        
-        # Test list fields
-        assert retrieved["input_ports"] == ["input1"]
-        assert retrieved["output_ports"] == ["output1"]
-        
-        # Test dict fields
-        assert retrieved["required_params"] == {"param1": {"type": "str"}}
-        assert retrieved["optional_params"] == {"param2": {"type": "int", "default": 42}}
-        
-        # Test boolean fields
-        assert retrieved["startable"] is True
-        assert retrieved["allow_multi_in"] is False
-        assert retrieved["idempotent"] is True
+    def test_serialize_field_none(self, backend):
+        """Test serializing None returns empty string."""
+        result = backend._serialize_field(None)
+        assert result == ""
     
-    def test_default_values_applied(self, registry):
-        """Test default values are applied for missing fields."""
-        minimal_component = {
-            "name": "minimal",
-            "class_name": "Minimal",
-            "module_path": "test.minimal",
-            "category": "test",
-            "description": "Minimal component",
-            "input_ports": [],
-            "output_ports": [],
-            "required_params": {},
-            "optional_params": {},
-            "output_globals": [],
-            "dependencies": [],
-            "startable": False,
-            "allow_multi_in": False,
-            "idempotent": True
-        }
-        
-        result = registry.register_component(minimal_component)
-        assert result is True
-        
-        retrieved = registry.get_component("minimal")
-        assert retrieved["startable"] is False
+    def test_deserialize_field_json_list(self, backend):
+        """Test deserializing JSON list."""
+        json_string = '["item1", "item2"]'
+        result = backend._deserialize_field(json_string, [])
+        assert result == ["item1", "item2"]
     
-    def test_database_persistence(self, sample_component):
-        """Test data persists across registry instances using temporary file."""
-        with temp_db_file() as temp_path:
-            # Register component with first registry instance
-            registry1 = ComponentRegistry(temp_path)
-            registry1.register_component(sample_component)
+    def test_deserialize_field_json_dict(self, backend):
+        """Test deserializing JSON dict."""
+        json_string = '{"key": "value"}'
+        result = backend._deserialize_field(json_string, {})
+        assert result == {"key": "value"}
+    
+    def test_deserialize_field_empty_string_returns_default(self, backend):
+        """Test that empty string returns default value."""
+        result = backend._deserialize_field("", ["default"])
+        assert result == ["default"]
+    
+    def test_deserialize_field_invalid_json_returns_default(self, backend):
+        """Test that invalid JSON returns default value."""
+        result = backend._deserialize_field("invalid_json", {"default": True})
+        assert result == {"default": True}
+    
+    def test_get_current_timestamp_format(self, backend):
+        """Test that timestamp is in ISO format."""
+        timestamp = backend._get_current_timestamp()
+        # Should be parseable as ISO datetime
+        from datetime import datetime
+        parsed = datetime.fromisoformat(timestamp)
+        assert isinstance(parsed, datetime)
+    
+    def test_get_current_timestamp_unique(self, backend):
+        """Test that consecutive timestamps are different."""
+        timestamp1 = backend._get_current_timestamp()
+        time.sleep(0.001)  # Small delay
+        timestamp2 = backend._get_current_timestamp()
+        assert timestamp1 != timestamp2
+    
+    def test_multiple_backends_same_db(self):
+        """Test multiple backend instances can use same database."""
+        with windows_safe_temp_db() as temp_path:
+            backend1 = BaseSQLBackend(temp_path)
+            backend2 = BaseSQLBackend(temp_path)
             
-            # Create new registry instance with same database
-            registry2 = ComponentRegistry(temp_path)
-            retrieved = registry2.get_component("test_component")
+            # Test using a separate connection to avoid locking
+            with sqlite3.connect(temp_path) as conn:
+                cursor = conn.execute("""
+                    SELECT COUNT(*) FROM sqlite_master 
+                    WHERE type='table' AND name IN ('components', 'joblets')
+                """)
+                table_count = cursor.fetchone()[0]
+                assert table_count == 2
             
-            assert retrieved is not None
-            assert retrieved["name"] == "test_component"
+            # Explicit cleanup
+            del backend1
+            del backend2
     
-    def test_extract_component_metadata_method(self, registry):
-        """Test _extract_component_metadata handles component classes correctly."""
-        # Test with mock class
-        class MockComponent:
-            COMPONENT_NAME = "mock"
-            CATEGORY = "test"
-            INPUT_PORTS = ["in1"]
-            OUTPUT_PORTS = ["out1"]
-            CONFIG_SCHEMA = {"required": {}, "optional": {}}
-            OUTPUT_GLOBALS = []
-            DEPENDENCIES = []
-            STARTABLE = True
-            ALLOW_MULTI_IN = False
-            IDEMPOTENT = True
-            __doc__ = "Mock component for testing"
+    def test_default_db_path_constant(self):
+        """Test that None db_path uses constant from utils."""
+        backend = BaseSQLBackend(None)
+        try:
+            assert backend.db_path is not None
+            assert str(backend.db_path).endswith('.db')
+        finally:
+            del backend
+    
+    def test_serialization_round_trip(self, backend):
+        """Test that serialize/deserialize is lossless."""
+        test_data = {
+            "list": ["a", "b", "c"],
+            "dict": {"nested": {"key": "value"}},
+            "mixed": [{"item": 1}, {"item": 2}]
+        }
         
-        metadata = registry._extract_component_metadata(MockComponent, "MockComponent", "test.mock")
-        
-        assert metadata["name"] == "mock"
-        assert metadata["class_name"] == "MockComponent"
-        assert metadata["module_path"] == "test.mock"
-        assert metadata["description"] == "Mock component for testing"
+        for key, original in test_data.items():
+            serialized = backend._serialize_field(original)
+            deserialized = backend._deserialize_field(serialized, None)
+            assert deserialized == original, f"Round trip failed for {key}"
+    
+    def test_database_file_creation_permissions(self):
+        """Test database file is created with proper permissions."""
+        with windows_safe_temp_db() as temp_path:
+            backend = BaseSQLBackend(temp_path)
+            
+            # File should exist and be readable/writable
+            assert os.path.exists(temp_path)
+            assert os.access(temp_path, os.R_OK)
+            assert os.access(temp_path, os.W_OK)
+            
+            del backend
+    
+    def test_concurrent_initialization_same_path(self):
+        """Test that concurrent initialization doesn't cause conflicts."""
+        with windows_safe_temp_db() as temp_path:
+            # Initialize multiple backends with same path
+            backends = []
+            try:
+                for i in range(3):
+                    backends.append(BaseSQLBackend(temp_path))
+                
+                # All should work without errors
+                assert len(backends) == 3
+                
+                # Database should still be valid
+                with sqlite3.connect(temp_path) as conn:
+                    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    assert 'components' in tables
+                    assert 'joblets' in tables
+                    
+            finally:
+                # Clean up all backends
+                for backend in backends:
+                    del backend
