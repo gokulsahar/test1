@@ -2,7 +2,7 @@ import re
 import networkx as nx
 from typing import Dict, List, Tuple, Any, Optional
 from pype.core.loader.loader import JobModel, ComponentModel
-from pype.core.registry.sqlite_backend import ComponentRegistry
+from pype.core.registry.component_registry import ComponentRegistry
 
 
 class GraphBuildError(Exception):
