@@ -40,7 +40,7 @@ def resolve_template_string(template: str, context: Dict[str, Any]) -> str:
     except re.error as e:
         raise TemplateError(f"Invalid template pattern: {e}")
 
-
+#implemented a recursive search and substitute
 def resolve_template_dict(data: Any, context: Dict[str, Any]) -> Any:
     """Recursively resolve templates in nested structures."""
     if isinstance(data, dict):

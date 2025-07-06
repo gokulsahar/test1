@@ -32,7 +32,7 @@ def load_schema(schema_name: str) -> Dict[str, Any]:
     except json.JSONDecodeError as e:
         raise ValidationError(f"Invalid JSON in schema file: {e}")
 
-
+#user friendly json schema errors
 def format_validation_error(error: JsonSchemaValidationError) -> str:
     """Format jsonschema validation error into readable message."""
     field_path = ".".join(str(p) for p in error.absolute_path) if error.absolute_path else "root"
@@ -53,7 +53,7 @@ def format_validation_error(error: JsonSchemaValidationError) -> str:
 
 
 def validate_job_schema(job_data: Dict[str, Any]) -> List[str]:
-    """Validate job dictionary against enhanced job.schema.json."""
+    """Validate job dictionary against job.schema.json."""
     if not isinstance(job_data, dict):
         return ["Job data must be a dictionary"]
     
@@ -87,7 +87,7 @@ def validate_component_schema(component_data: Dict[str, Any]) -> List[str]:
 
 
 def validate_global_variable_references(job_data: Dict[str, Any]) -> List[str]:
-    """Validate global variable references point to existing components."""
+    """Validate global variable references point to components in the current job."""
     errors = []
     
     # Get component names
@@ -100,7 +100,7 @@ def validate_global_variable_references(job_data: Dict[str, Any]) -> List[str]:
     
     for comp_name, var_name in global_vars:
         if comp_name not in component_names:
-            errors.append(f"Global variable '{{{{{comp_name}{GLOBAL_VAR_DELIMITER}{var_name}}}}}' references unknown component '{comp_name}'")
+            errors.append(f"Global variable '{{{{{comp_name}{GLOBAL_VAR_DELIMITER}{var_name}}}}}' references unused component '{comp_name}'")
     
     return errors
 

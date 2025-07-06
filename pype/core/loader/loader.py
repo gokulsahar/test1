@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import ruamel.yaml
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from pype.core.loader.validator import validate_job_file
 from pype.core.loader.templater import resolve_template_yaml, TemplateError
 from pype.core.utils.constants import DEFAULT_ENCODING
@@ -45,7 +45,8 @@ class JobModel(BaseModel):
     components: List[ComponentModel] = Field(min_items=1)
     connections: ConnectionsModel
 
-    @validator('components')
+    @field_validator('components')
+    @classmethod
     def validate_unique_component_names(cls, v):
         """Ensure component names are unique."""
         names = [comp.name for comp in v]
