@@ -86,7 +86,7 @@ black
 isort
 mypy
 
-may be try tox?
+may be try tox? PYLINT?
 
 
 
