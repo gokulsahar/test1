@@ -4,9 +4,7 @@ If you haven’t already, create a requirements-dev.txt:
 
 pytest
 pytest-cov
-black
-isort
-mypy
+
 
 Then run:
 pip install -r requirements-dev.txt
@@ -27,12 +25,68 @@ pytest --cov=pype --cov-report=html
 
 Then open htmlcov/index.html in your browser to explore visually.
 
+
+
+___________________________________________________
+                PYTEST DOCS
+___________________________________________________
+
+#  Run all tests
+pytest
+
+#  Run tests in a specific file
+pytest tests/test_pipeline.py
+
+#  Run a specific test function
+pytest tests/test_pipeline.py::test_run_etl_step
+
+#  Run tests with coverage (only tested files)
+pytest --cov=your_package_name
+
+#  Run tests with detailed coverage (only tested files)
+pytest --cov=your_package_name --cov-report=term --cov-fail-under=90 --cov-branch
+
+#  Run tests with coverage including untested files via .coveragerc
+pytest --cov=your_package_name --cov-report=term-missing --cov-report=html --cov-config=.coveragerc
+
+#  Example .coveragerc
+# Save as .coveragerc in project root
+[run]
+branch = True
+source = your_package_name
+omit =
+    */__init__.py
+    */settings.py
+
+[report]
+show_missing = True
+skip_covered = True
+
+#  Dev-friendly run: limit failures, show missing lines, HTML report
+pytest --cov=your_package_name --cov-report=term-missing --cov-report=html -v --maxfail=2 -k "test_etl"
+
+#  Useful flags
+# -x             → stop after first failure
+# -v             → verbose
+# --maxfail=3    → stop after 3 failures
+# --tb=short     → short traceback
+# --pdb          → debugger on failure
+# -k "pattern"   → run tests matching pattern
+
+
+______________________________________________________________________________________________
+
 TO DO:
 Run Everything via Pre-commit (if configured)
 Once pre-commit is installed:
 pre-commit run --all-files
 
-latest try tox
+need to set up :
+black
+isort
+mypy
+
+may be try tox?
 
 
 
