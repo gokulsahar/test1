@@ -14,7 +14,6 @@ class ComponentForTesting(BaseComponent):
     OUTPUT_GLOBALS = ["global1"]
     DEPENDENCIES = ["dep1"]
     STARTABLE = True
-    EVENTS = ["ok", "error"]
     ALLOW_MULTI_IN = True
     IDEMPOTENT = False
     
@@ -97,7 +96,6 @@ class TestBaseComponent:
         assert component.get_output_ports() == ["output1"]
         assert component.get_output_globals() == ["global1"]
         assert component.get_dependencies() == ["dep1"]
-        assert component.get_events() == ["ok", "error"]
         assert component.is_startable() is True
         assert component.allows_multi_input() is True
         assert component.is_idempotent() is False

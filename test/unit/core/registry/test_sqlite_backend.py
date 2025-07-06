@@ -75,7 +75,6 @@ class TestComponentRegistry:
             "output_globals": ["global1"],
             "dependencies": ["dep1"],
             "startable": True,
-            "events": ["ok", "error"],
             "allow_multi_in": False,
             "idempotent": True
         }
@@ -146,7 +145,6 @@ class TestComponentRegistry:
         # Test list fields
         assert retrieved["input_ports"] == ["input1"]
         assert retrieved["output_ports"] == ["output1"]
-        assert retrieved["events"] == ["ok", "error"]
         
         # Test dict fields
         assert retrieved["required_params"] == {"param1": {"type": "str"}}
@@ -172,7 +170,6 @@ class TestComponentRegistry:
             "output_globals": [],
             "dependencies": [],
             "startable": False,
-            "events": ["ok", "error"],
             "allow_multi_in": False,
             "idempotent": True
         }
@@ -181,7 +178,6 @@ class TestComponentRegistry:
         assert result is True
         
         retrieved = registry.get_component("minimal")
-        assert retrieved["events"] == ["ok", "error"]
         assert retrieved["startable"] is False
     
     def test_database_persistence(self, sample_component):
@@ -210,7 +206,6 @@ class TestComponentRegistry:
             OUTPUT_GLOBALS = []
             DEPENDENCIES = []
             STARTABLE = True
-            EVENTS = ["ok", "error"]
             ALLOW_MULTI_IN = False
             IDEMPOTENT = True
             __doc__ = "Mock component for testing"

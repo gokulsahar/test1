@@ -15,7 +15,6 @@ class TestEchoComponent:
         assert EchoComponent.OUTPUT_GLOBALS == []
         assert EchoComponent.DEPENDENCIES == []
         assert EchoComponent.STARTABLE is True
-        assert EchoComponent.EVENTS == ["ok", "error"]
         assert EchoComponent.ALLOW_MULTI_IN is False
         assert EchoComponent.IDEMPOTENT is True
     
