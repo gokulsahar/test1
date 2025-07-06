@@ -36,7 +36,6 @@ class ComponentRegistry:
                     output_globals TEXT NOT NULL DEFAULT '[]',
                     dependencies TEXT NOT NULL DEFAULT '[]',
                     startable INTEGER NOT NULL DEFAULT 0,
-                    events TEXT NOT NULL DEFAULT '["ok","error"]',
                     allow_multi_in INTEGER NOT NULL DEFAULT 0,
                     idempotent INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -65,7 +64,7 @@ class ComponentRegistry:
         required_fields = [
             'name', 'class_name', 'module_path', 'category', 'description',
             'input_ports', 'output_ports', 'required_params', 'optional_params',
-            'output_globals', 'dependencies', 'startable', 'events', 'allow_multi_in',
+            'output_globals', 'dependencies', 'startable', 'allow_multi_in',
             'idempotent'
         ]
         
@@ -90,7 +89,7 @@ class ComponentRegistry:
                 return False
             
             # List fields
-            for list_field in ['input_ports', 'output_ports', 'output_globals', 'dependencies', 'events']:
+            for list_field in ['input_ports', 'output_ports', 'output_globals', 'dependencies']:
                 if not isinstance(component[list_field], list):
                     return False
             
@@ -103,12 +102,6 @@ class ComponentRegistry:
             for bool_field in ['startable', 'allow_multi_in', 'idempotent']:
                 if not isinstance(component[bool_field], bool):
                     return False
-            
-            # Events must not be empty and contain valid event types
-            valid_events = {'ok', 'error', 'parallelize', 'synchronise', 'subjob_ok', 'subjob_error'}
-            events = component['events']
-            if not events or not all(event in valid_events or event.startswith('if') for event in events):
-                return False
             
             return True
             
@@ -127,7 +120,6 @@ class ComponentRegistry:
             'output_globals': [],
             'dependencies': [],
             'startable': 0,
-            'events': ['ok', 'error'],
             'allow_multi_in': 0,
             'idempotent': 1
         }
@@ -147,7 +139,6 @@ class ComponentRegistry:
             self._serialize_field(data['output_globals']),
             self._serialize_field(data['dependencies']),
             int(data['startable']),
-            self._serialize_field(data['events']),
             int(data['allow_multi_in']),
             int(data['idempotent']),
             datetime.now().isoformat()
@@ -167,9 +158,9 @@ class ComponentRegistry:
                 INSERT OR REPLACE INTO components (
                     name, class_name, module_path, category, description,
                     input_ports, output_ports, required_params, optional_params,
-                    output_globals, dependencies, startable, events, allow_multi_in,
+                    output_globals, dependencies, startable, allow_multi_in,
                     idempotent, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
             conn.commit()
         
@@ -200,7 +191,6 @@ class ComponentRegistry:
                 'output_globals': self._deserialize_field(row['output_globals'], []),
                 'dependencies': self._deserialize_field(row['dependencies'], []),
                 'startable': bool(row['startable']),
-                'events': self._deserialize_field(row['events'], ['ok', 'error']),
                 'allow_multi_in': bool(row['allow_multi_in']),
                 'idempotent': bool(row['idempotent']),
                 'created_at': row['created_at'],
@@ -228,7 +218,6 @@ class ComponentRegistry:
                     'output_globals': self._deserialize_field(row['output_globals'], []),
                     'dependencies': self._deserialize_field(row['dependencies'], []),
                     'startable': bool(row['startable']),
-                    'events': self._deserialize_field(row['events'], ['ok', 'error']),
                     'allow_multi_in': bool(row['allow_multi_in']),
                     'idempotent': bool(row['idempotent']),
                     'created_at': row['created_at'],
@@ -254,7 +243,6 @@ class ComponentRegistry:
             'output_globals': getattr(cls, 'OUTPUT_GLOBALS', []),
             'dependencies': getattr(cls, 'DEPENDENCIES', []),
             'startable': getattr(cls, 'STARTABLE', False),
-            'events': getattr(cls, 'EVENTS', ['ok', 'error']),
             'allow_multi_in': getattr(cls, 'ALLOW_MULTI_IN', False),
             'idempotent': getattr(cls, 'IDEMPOTENT', True)
         }
