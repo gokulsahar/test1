@@ -656,3 +656,56 @@ class SubjobAnalyzer:
             parallel_groups.append(sorted(group))  # Sort for determinism
         
         return parallel_groups
+    
+    
+    # TODO: Add these methods to SubjobAnalyzer for better planner integration
+
+def get_subjob_start_components(self) -> List[str]:
+    """
+    Get all components marked with is_subjob_start=True.
+    
+    Returns:
+        List of component names that are subjob start points
+    
+    TODO: Implement this method to return components with is_subjob_start flag
+    """
+    pass
+
+def validate_subjob_control_edges_strict(self, dag: nx.DiGraph) -> List[str]:
+    """
+    Validate that subjob_ok/subjob_error edges only exist on subjob start components.
+    
+    Args:
+        dag: NetworkX DiGraph with subjob analysis complete
+        
+    Returns:
+        List of validation errors
+        
+    TODO: Implement stricter validation for subjob control edges
+    """
+    pass
+
+def get_subjob_metadata_by_component(self, component_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Get subjob metadata for a specific component.
+    
+    Args:
+        component_name: Name of the component
+        
+    Returns:
+        Subjob metadata including subjob_id, execution_order, etc.
+        
+    TODO: Implement component-to-subjob metadata lookup
+    """
+    pass
+
+def get_parallel_subjob_groups(self) -> Dict[int, List[str]]:
+    """
+    Get subjobs grouped by parallel execution capability.
+    
+    Returns:
+        {group_number: [subjob_ids]} for parallel execution planning
+        
+    TODO: Implement parallel group extraction for execution planning
+    """
+    pass
