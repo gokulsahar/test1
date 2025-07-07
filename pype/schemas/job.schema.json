@@ -126,7 +126,16 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^[a-zA-Z][a-zA-Z0-9]*\\s*\\((ok|error|parallelize|synchronise|subjob_ok|subjob_error|if\\d+)\\).*$"
+            "anyOf": [
+              {
+                "pattern": "^[a-zA-Z][a-zA-Z0-9]*\\s*\\(if\\d+\\)\\s*:\\s*\"[^\"]*\"\\s+[a-zA-Z][a-zA-Z0-9]*$",
+                "description": "If control edge: component (if1): \"condition\" target"
+              },
+              {
+                "pattern": "^[a-zA-Z][a-zA-Z0-9]*\\s*\\((ok|error|parallelize|synchronise|subjob_ok|subjob_error)\\)\\s+[a-zA-Z][a-zA-Z0-9]*$",
+                "description": "Regular control edge: component (trigger) target"
+              }
+            ]
           }
         }
       }

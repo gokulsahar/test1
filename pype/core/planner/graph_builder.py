@@ -1,6 +1,7 @@
 import re
 import networkx as nx
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Set
+from collections import defaultdict
 from pype.core.loader.loader import JobModel, ComponentModel
 from pype.core.registry.component_registry import ComponentRegistry
 
@@ -49,17 +50,17 @@ class GraphBuilder:
         except GraphBuildError as e:
             errors.append(str(e))
         
-        # Create data edges with validation
+        #Validate data edges
         data_errors = self._validate_data_connections(dag, job_model.connections.data)
         errors.extend(data_errors)
         
-        # Create control edges with validation
+        #Validate control edges
         control_errors = self._validate_control_connections(dag, job_model.connections.control)
         errors.extend(control_errors)
         
         # Stop if any errors found
         if errors:
-            raise GraphBuildError(f"Graph construction failed: {'; '.join(errors)}")
+            raise GraphBuildError(f"Graph construction failed: {'\n'.join(errors)}")
         
         # Create edges after validation passes
         self._create_data_edges(dag, job_model.connections.data)
@@ -71,6 +72,10 @@ class GraphBuilder:
         """Create nodes with rich metadata for runtime performance."""
         for component in components:
             registry_metadata = self._validate_component_exists(component.type)
+            
+            # Check for duplicate component names
+            if dag.has_node(component.name):
+                raise GraphBuildError(f"Duplicate component name: '{component.name}'")
             
             # Filter out timestamp columns to reduce metadata size
             filtered_metadata = {k: v for k, v in registry_metadata.items() 
@@ -109,6 +114,11 @@ class GraphBuilder:
         
         for connection_str in connections:
             source_comp, source_port, target_comp, target_port = self._parse_data_connection(connection_str)
+            
+            # Check for duplicate connections between same components
+            if dag.has_edge(source_comp, target_comp):
+                raise GraphBuildError(f"Multiple connections between '{source_comp}' and '{target_comp}' not allowed")
+            
             dag.add_edge(source_comp, target_comp, **{
                 'edge_type': 'data',
                 'source_port': source_port,
@@ -118,43 +128,43 @@ class GraphBuilder:
     def _create_control_edges(self, dag: nx.DiGraph, control_connections: List[str]) -> None:
         """Create control edges from connections.control section."""
         for connection_str in control_connections:
-            source_comp, targets, edge_attrs = self._parse_control_connection(connection_str)
+            source_comp, target_comp, edge_attrs = self._parse_control_connection(connection_str)
             
-            # Handle multiple targets (e.g., parallelise)
-            target_list = [t.strip() for t in targets.split(',')]
-            for target_comp in target_list:
-                dag.add_edge(source_comp, target_comp, **{
-                    'edge_type': 'control',
-                    **edge_attrs
-                })
+            # Check for duplicate connections between same components
+            if dag.has_edge(source_comp, target_comp):
+                raise GraphBuildError(f"Multiple connections between '{source_comp}' and '{target_comp}' not allowed")
+            
+            dag.add_edge(source_comp, target_comp, **{
+                'edge_type': 'control',
+                **edge_attrs
+            })
     
     def _parse_control_connection(self, connection_str: str) -> Tuple[str, str, Dict[str, Any]]:
         """
         Parse control connection strings.
         
         Returns:
-            (source_component, target_components, edge_attributes)
+            (source_component, target_component, edge_attributes)
         """
-        # Pattern for: source (trigger[order]): "condition" targets
-        if_pattern = r'^(\w+)\s*\(if(\d+)\):\s*"([^"]+)"\s+(.+)$'
+        # Pattern for: source (if[order]): "condition" target
+        if_pattern = r'^(\w+)\s*\(if(\d+)\):\s*"([^"]+)"\s+(\w+)$'
         if_match = re.match(if_pattern, connection_str.strip())
         
         if if_match:
-            source, order, condition, targets = if_match.groups()
-            # TODO: Add expression syntax validation for condition
-            return source, targets, {
+            source, order, condition, target = if_match.groups()
+            return source, target, {
                 'trigger': 'if',
                 'condition': condition,
                 'order': int(order)
             }
         
-        # Pattern for: source (trigger) targets
-        general_pattern = r'^(\w+)\s*\((\w+)\)\s+(.+)$'
+        # Pattern for: source (trigger) target
+        general_pattern = r'^(\w+)\s*\((\w+)\)\s+(\w+)$'
         general_match = re.match(general_pattern, connection_str.strip())
         
         if general_match:
-            source, trigger, targets = general_match.groups()
-            return source, targets, {'trigger': trigger}
+            source, trigger, target = general_match.groups()
+            return source, target, {'trigger': trigger}
         
         raise InvalidConnectionError(f"Invalid control connection syntax: {connection_str}")
     
@@ -193,23 +203,86 @@ class GraphBuilder:
         return errors
     
     def _validate_control_connections(self, dag: nx.DiGraph, control_connections: List[str]) -> List[str]:
-        """Validate control connections reference existing components."""
+        """Validate control connections."""
         errors = []
+        
+        # Track control edges by source component to detect duplicates
+        control_edge_tracker = defaultdict(lambda: defaultdict(set))  # {source: {trigger_type: {targets or orders}}}
+        
+        # Track exact edge signatures to detect NetworkX-level duplicates
+        edge_signatures = set()  # {(source, target, trigger, order)}
         
         for connection_str in control_connections:
             try:
-                source_comp, targets, _ = self._parse_control_connection(connection_str)
+                source_comp, target_comp, edge_attrs = self._parse_control_connection(connection_str)
+                trigger = edge_attrs.get('trigger')
+                order = edge_attrs.get('order', 0)  # Default order for non-if edges
                 
+                # Validate components exist
                 if source_comp not in dag.nodes:
                     errors.append(f"Control connection references unknown source component: {source_comp}")
+                    continue
+                if target_comp not in dag.nodes:
+                    errors.append(f"Control connection references unknown target component: {target_comp}")
+                    continue
                 
-                # Check all target components
-                target_list = [t.strip() for t in targets.split(',')]
-                for target_comp in target_list:
-                    if target_comp not in dag.nodes:
-                        errors.append(f"Control connection references unknown target component: {target_comp}")
-                        
+                # Check for exact duplicate edges (NetworkX would silently overwrite)
+                edge_signature = (source_comp, target_comp, trigger, order)
+                if edge_signature in edge_signatures:
+                    errors.append(f"Duplicate control edge detected: {connection_str}")
+                    continue
+                edge_signatures.add(edge_signature)
+                
+                # Validate control edge constraints
+                validation_error = self._validate_control_edge_constraints(
+                    source_comp, target_comp, trigger, edge_attrs, control_edge_tracker
+                )
+                if validation_error:
+                    errors.append(validation_error)
+                    
             except InvalidConnectionError as e:
                 errors.append(str(e))
         
+        
+        
+        
         return errors
+    
+    def _validate_control_edge_constraints(self, source_comp: str, target_comp: str, 
+                                         trigger: str, edge_attrs: Dict[str, Any],
+                                         control_edge_tracker: Dict[str, Dict[str, Set]]) -> Optional[str]:
+        """
+        Validate control edge constraints based on trigger type.
+        
+        Returns:
+            Error message if constraint violated, None if valid
+        """
+        tracker = control_edge_tracker[source_comp]
+        
+        if trigger in ['ok', 'error', 'subjob_ok', 'subjob_error', 'synchronise']:
+            # These triggers can only appear once per component
+            if trigger in tracker:
+                return (f"Component '{source_comp}' already has a '{trigger}' control edge. "
+                       f"Only one '{trigger}' edge allowed per component.")
+            tracker[trigger].add(target_comp)
+            
+        elif trigger == 'parallelise':
+            # Parallelise can appear multiple times, but we need to track targets
+            # to ensure minimum 2 targets total across all parallelise edges
+            tracker[trigger].add(target_comp)
+            
+        elif trigger == 'if':
+            # If edges can have multiple per component, but only one per order
+            order = edge_attrs.get('order')
+            if order is None:
+                return f"If control edge from '{source_comp}' missing order number"
+            
+            if order in tracker[trigger]:
+                return (f"Component '{source_comp}' already has an 'if{order}' control edge. "
+                       f"Only one 'if' edge allowed per order number.")
+            tracker[trigger].add(order)
+            
+        else:
+            return f"Unknown control edge trigger: '{trigger}'"
+        
+        return None
