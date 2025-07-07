@@ -243,8 +243,11 @@ class GraphBuilder:
             except InvalidConnectionError as e:
                 errors.append(str(e))
         
-        
-        
+        # Validate parallelise constraints after processing all edges
+        for src, triggers in control_edge_tracker.items():
+            parallel_targets = triggers.get('parallelise', set())
+            if 'parallelise' in triggers and len(parallel_targets) < 2:
+                errors.append(f"Component '{src}' has <2 targets for parallelise: {list(parallel_targets)}")
         
         return errors
     
