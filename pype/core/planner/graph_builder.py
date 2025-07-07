@@ -206,17 +206,13 @@ class GraphBuilder:
         """Validate control connections."""
         errors = []
         
-        # Track control edges by source component to detect duplicates
+        # Track control edges by source component to detect multi control edges of same type
         control_edge_tracker = defaultdict(lambda: defaultdict(set))  # {source: {trigger_type: {targets or orders}}}
-        
-        # Track exact edge signatures to detect NetworkX-level duplicates
-        edge_signatures = set()  # {(source, target, trigger, order)}
         
         for connection_str in control_connections:
             try:
                 source_comp, target_comp, edge_attrs = self._parse_control_connection(connection_str)
                 trigger = edge_attrs.get('trigger')
-                order = edge_attrs.get('order', 0)  # Default order for non-if edges
                 
                 # Validate components exist
                 if source_comp not in dag.nodes:
@@ -225,13 +221,6 @@ class GraphBuilder:
                 if target_comp not in dag.nodes:
                     errors.append(f"Control connection references unknown target component: {target_comp}")
                     continue
-                
-                # Check for exact duplicate edges (NetworkX would silently overwrite)
-                edge_signature = (source_comp, target_comp, trigger, order)
-                if edge_signature in edge_signatures:
-                    errors.append(f"Duplicate control edge detected: {connection_str}")
-                    continue
-                edge_signatures.add(edge_signature)
                 
                 # Validate control edge constraints
                 validation_error = self._validate_control_edge_constraints(
