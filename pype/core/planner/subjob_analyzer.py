@@ -28,6 +28,11 @@ class UnmatchedSynchroniseError(SubjobAnalysisError):
     pass
 
 
+class InvalidSubjobControlEdgeError(SubjobAnalysisError):
+    """Raised when subjob_ok/subjob_error edges are on non-start components."""
+    pass
+
+
 class SubjobAnalyzer:
     """Analyzes DAG to detect subjob boundaries for parallel execution and checkpointing."""
     
@@ -36,6 +41,7 @@ class SubjobAnalyzer:
         self._parallelise_map = {}  # {source_component: [target_components]}
         self._synchronise_map = {}  # {target_component: [source_components]}
         self._component_to_subjob = {}  # {component_name: subjob_id}
+        self._subjob_start_components = {}  # {subjob_id: [start_components]}
         
     def analyze_subjobs(self, dag: nx.DiGraph) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]], List[str]]:
         """
@@ -70,14 +76,22 @@ class SubjobAnalyzer:
             # Step 5: Build subjob component mapping
             subjob_components = self._group_components_by_subjob()
             
-            # Step 6: Validate subjob structure
+            # Step 6: Identify subjob start components and add flags
+            self._subjob_start_components = self._identify_subjob_start_components(dag, subjob_components)
+            self._add_subjob_start_flags(dag)
+            
+            # Step 7: Validate subjob control edges
+            subjob_control_errors = self._validate_subjob_control_edges(dag)
+            errors.extend(subjob_control_errors)
+            
+            # Step 8: Validate subjob structure
             structure_errors = self._validate_subjob_structure(dag, subjob_components)
             errors.extend(structure_errors)
             
             if errors:
                 return {}, {}, errors
             
-            # Step 7: Generate execution metadata
+            # Step 9: Generate execution metadata
             subjob_metadata = self._generate_subjob_metadata(dag, subjob_components)
             
         except Exception as e:
@@ -381,6 +395,97 @@ class SubjobAnalyzer:
         
         return dict(subjob_components)
     
+    def _identify_subjob_start_components(self, dag: nx.DiGraph, 
+                                        subjob_components: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        """Identify the start components for each subjob."""
+        subjob_start_components = {}
+        
+        for subjob_id, components in subjob_components.items():
+            start_components = []
+            
+            if subjob_id == "main":
+                # Main subjob starts with startable components
+                for comp in components:
+                    if dag.nodes[comp].get('startable', False):
+                        start_components.append(comp)
+            else:
+                # Parallel subjobs start with parallelise targets
+                # Extract the parallel source from subjob_id pattern: "source_parallel_idx"
+                if "_parallel_" in subjob_id:
+                    # Handle nested subjobs (contain dots)
+                    if '.' in subjob_id:
+                        # Extract parallel source from nested pattern: "parent.source_parallel_idx"
+                        last_part = subjob_id.split('.')[-1]  # Get "source_parallel_idx"
+                        parallel_source = last_part.rsplit("_parallel_", 1)[0]
+                    else:
+                        # Top-level parallel subjob
+                        parallel_source = subjob_id.rsplit("_parallel_", 1)[0]
+                    
+                    parallel_targets = self._parallelise_map.get(parallel_source, [])
+                    
+                    # Find which target corresponds to this subjob
+                    for comp in components:
+                        if comp in parallel_targets:
+                            start_components.append(comp)
+            
+            # If no start components found but subjob has components, 
+            # find components with no inbound control edges within the subjob
+            if not start_components and components:
+                for comp in components:
+                    has_inbound_control = False
+                    for source, target, edge_data in dag.in_edges(comp, data=True):
+                        if (edge_data.get('edge_type') == 'control' and 
+                            source in components):  # Source is in same subjob
+                            has_inbound_control = True
+                            break
+                    
+                    if not has_inbound_control:
+                        start_components.append(comp)
+            
+            subjob_start_components[subjob_id] = sorted(start_components)
+        
+        return subjob_start_components
+    
+    def _add_subjob_start_flags(self, dag: nx.DiGraph) -> None:
+        """Add is_subjob_start flag to appropriate components in the DAG."""
+        for subjob_id, start_components in self._subjob_start_components.items():
+            for comp in start_components:
+                if comp in dag.nodes:
+                    dag.nodes[comp]['is_subjob_start'] = True
+        
+        # Ensure all other components have the flag set to False
+        for node in dag.nodes():
+            if 'is_subjob_start' not in dag.nodes[node]:
+                dag.nodes[node]['is_subjob_start'] = False
+    
+    def _validate_subjob_control_edges(self, dag: nx.DiGraph) -> List[str]:
+        """Validate subjob_ok and subjob_error edges are only on subjob start components."""
+        errors = []
+        
+        # Find all components that have subjob_ok or subjob_error outgoing edges
+        components_with_subjob_edges = set()
+        
+        for source, target, edge_data in dag.edges(data=True):
+            if (edge_data.get('edge_type') == 'control' and 
+                edge_data.get('trigger') in ['subjob_ok', 'subjob_error']):
+                components_with_subjob_edges.add(source)
+        
+        # Validate each component with subjob edges
+        for comp in components_with_subjob_edges:
+            is_subjob_start = dag.nodes[comp].get('is_subjob_start', False)
+            
+            if not is_subjob_start:
+                subjob_id = self._component_to_subjob.get(comp, 'unknown')
+                start_components = self._subjob_start_components.get(subjob_id, [])
+                
+                errors.append(
+                    f"Component '{comp}' has subjob_ok/subjob_error edges but is not a subjob start component. "
+                    f"Only subjob start components can have these edges. "
+                    f"Start components for subjob '{subjob_id}': {start_components}"
+                )
+        
+        return errors
+    
     def _validate_subjob_structure(self, dag: nx.DiGraph, 
                                   subjob_components: Dict[str, List[str]]) -> List[str]:
         """Validate subjob structure is correct and executable."""
@@ -483,7 +588,10 @@ class SubjobAnalyzer:
                         else:
                             child_subjobs.append(f"{comp}_parallel_{idx}")
             
-            # Identify startable components within subjob
+            # Get subjob start components (those with is_subjob_start=True)
+            subjob_start_components = self._subjob_start_components.get(subjob_id, [])
+            
+            # Identify startable components within subjob (those with startable=True)
             startable_in_subjob = [
                 comp for comp in components
                 if dag.nodes[comp].get('startable', False)
@@ -498,7 +606,8 @@ class SubjobAnalyzer:
                 'checkpoint_boundary': True,  # All subjob ends are checkpoints
                 'resume_point': True,
                 'dependencies': sorted(list(subjob_deps.predecessors(subjob_id))),
-                'startable_components': sorted(startable_in_subjob)
+                'startable_components': sorted(startable_in_subjob),  # Components with startable=True
+                'subjob_start_components': sorted(subjob_start_components)  # Components with is_subjob_start=True
             }
         
         return subjob_metadata

@@ -235,44 +235,89 @@ class StructureValidator:
     
     def _mark_iterator_boundary_recursive(self, dag: nx.DiGraph, iterator_comp: str, boundary_name: str) -> None:
         """Recursively mark iterator boundary starting from iterator's data outputs."""
-        # Find all data output edges from iterator
+        # Gather all data outputs of this iterator
         data_outputs = [
-            target for _, target, edge_data in dag.out_edges(iterator_comp, data=True)
+            target
+            for _, target, edge_data in dag.out_edges(iterator_comp, data=True)
             if edge_data.get('edge_type') == 'data'
         ]
         
-        # Start traversal from each data output
-        for start_comp in data_outputs:
-            self._traverse_iterator_boundary(dag, start_comp, boundary_name, set())
-    
-    def _traverse_iterator_boundary(self, dag: nx.DiGraph, current_comp: str, boundary_name: str, visited: Set[str]) -> None:
+        # Traverse from each data output under the given boundary
+        for start in data_outputs:
+            self._traverse_iterator_boundary(dag, start, boundary_name, set())
+
+
+    def _traverse_iterator_boundary(
+        self,
+        dag: nx.DiGraph,
+        current_comp: str,
+        boundary_name: str,
+        visited: Set[str]
+    ) -> None:
         """Traverse downstream from component, marking iterator boundary."""
+        # 1) Avoid cycles
         if current_comp in visited:
             return
-        
         visited.add(current_comp)
-        
-        # Check if this is a nested iterator
+
+        # 2) Check for conflicting boundary (validated elsewhere)
+        existing = dag.nodes[current_comp].get('iterator_boundary', "")
+        if existing and existing != boundary_name:
+            pass  # will be caught in validation
+
+        # 3) Nested iterator case
         if dag.nodes[current_comp].get('component_type') == 'iterator':
-            # Mark the iterator itself as part of current boundary
+            # a) Tag this iterator under the *outer* boundary
             dag.nodes[current_comp]['iterator_boundary'] = boundary_name
-            # Start new boundary for this iterator's outputs
-            self._mark_iterator_boundary_recursive(dag, current_comp, current_comp)
+
+            # b) Rescue edges off *this* iterator still belong to the outer boundary
+            for _, rescue_target, rescue_data in dag.out_edges(current_comp, data=True):
+                trig = rescue_data.get('trigger', "")
+                if rescue_data.get('edge_type') == 'control' and \
+                trig in ('ok', 'error', 'subjob_ok', 'subjob_error'):
+                    self._traverse_iterator_boundary(
+                        dag,
+                        rescue_target,
+                        boundary_name,
+                        visited
+                    )
+
+            # c) Now start the *inner* boundary for this iterator
+            self._mark_iterator_boundary_recursive(
+                dag,
+                current_comp,
+                current_comp
+            )
             return
-        
-        # Mark current component with boundary
+
+        # 4) Normal component: tag under current boundary
         dag.nodes[current_comp]['iterator_boundary'] = boundary_name
-        
-        # Continue traversal through all outgoing edges (data and control)
+
+        # 5) Recurse on outgoing edges, skipping only 
+        #    - ok/error on iterators
+        #    - subjob_ok/error on subjob-starts
+        is_iterator     = dag.nodes[current_comp].get('component_type') == 'iterator'
+        is_subjob_start = dag.nodes[current_comp].get('is_subjob_start', False)
+
         for _, target, edge_data in dag.out_edges(current_comp, data=True):
-            edge_type = edge_data.get('edge_type')
-            trigger = edge_data.get('trigger', '')
-            
-            # Skip ok/error edges that go outside boundary
-            if edge_type == 'control' and trigger in ['ok', 'error', 'subjob_ok', 'subjob_error']:
+            etype   = edge_data.get('edge_type')
+            trigger = edge_data.get('trigger', "")
+
+            # skip ok/error only if we're on an iterator node
+            if etype == 'control' and trigger in ('ok', 'error') and is_iterator:
                 continue
-            
-            self._traverse_iterator_boundary(dag, target, boundary_name, visited)
+
+            # skip subjob_ok/error only if we're on the subjob’s first component
+            if etype == 'control' and trigger in ('subjob_ok', 'subjob_error') and is_subjob_start:
+                continue
+
+            # otherwise keep going under the same boundary
+            self._traverse_iterator_boundary(
+                dag,
+                target,
+                boundary_name,
+                visited
+            )
     
     def _validate_global_references(self, dag: nx.DiGraph) -> List[ValidationError]:
         """Validate global variable references in component configurations."""
@@ -280,7 +325,7 @@ class StructureValidator:
         
         for node, node_data in dag.nodes(data=True):
             config = node_data.get('config', {})
-            global_refs = self._extract_global_references(config)
+            global_refs = self._extract_global_references_recursive(config)
             
             for comp_name, global_var in global_refs:
                 if comp_name not in dag.nodes():
@@ -289,19 +334,36 @@ class StructureValidator:
                         message=f"Component '{node}' references non-existent component '{comp_name}' in global variable '{comp_name}__{global_var}'",
                         component=node
                     ))
+                else:
+                    # Check if the referenced component declares this global variable
+                    target_component_data = dag.nodes[comp_name]
+                    output_globals = target_component_data.get('registry_metadata', {}).get('output_globals', [])
+                    
+                    if global_var not in output_globals:
+                        errors.append(ValidationError(
+                            code="INVALID_GLOBAL_REFERENCE",
+                            message=f"Component '{node}' references global variable '{global_var}' from component '{comp_name}', but '{comp_name}' does not declare this global variable. Available globals: {output_globals}",
+                            component=node
+                        ))
         
         return errors
     
-    def _extract_global_references(self, config: Dict[str, Any]) -> List[Tuple[str, str]]:
-        """Extract global variable references from component configuration."""
-        global_refs = []
-        config_str = json.dumps(config)
+    def _extract_global_references_recursive(self, obj: Any, refs: List[Tuple[str, str]] = None) -> List[Tuple[str, str]]:
+        """Recursively extract global variable references from nested structures."""
+        if refs is None:
+            refs = []
         
-        matches = re.findall(GLOBAL_VAR_PATTERN, config_str)
-        for comp_name, global_var in matches:
-            global_refs.append((comp_name, global_var))
+        if isinstance(obj, str):
+            matches = re.findall(GLOBAL_VAR_PATTERN, obj)
+            refs.extend(matches)
+        elif isinstance(obj, dict):
+            for value in obj.values():
+                self._extract_global_references_recursive(value, refs)
+        elif isinstance(obj, list):
+            for item in obj:
+                self._extract_global_references_recursive(item, refs)
         
-        return global_refs
+        return refs
     
     def _validate_iterator_components(self, dag: nx.DiGraph) -> List[ValidationError]:
         """Validate iterator component structure and configuration."""
@@ -359,25 +421,52 @@ class StructureValidator:
         return errors
     
     def _validate_edge_connectivity(self, dag: nx.DiGraph) -> List[ValidationError]:
-        """Validate edge connectivity and consistency."""
+        """Validate that there are no duplicate edges and no mixed data+control
+        between the same pair of components."""
         errors = []
         
-        # Check for duplicate edges with conflicting attributes
-        edge_map = defaultdict(list)
-        
+        # 1) Build signatures to catch exact duplicates
+        edge_signatures = defaultdict(int)
         for source, target, edge_data in dag.edges(data=True):
-            key = (source, target)
-            edge_map[key].append(edge_data)
+            edge_type = edge_data.get('edge_type', 'unknown')
+            if edge_type == 'control':
+                trigger   = edge_data.get('trigger', 'unknown')
+                signature = (source, target, edge_type, trigger)
+            else:
+                src_port  = edge_data.get('source_port', 'unknown')
+                tgt_port  = edge_data.get('target_port', 'unknown')
+                signature = (source, target, edge_type, src_port, tgt_port)
+            edge_signatures[signature] += 1
         
-        for (source, target), edge_list in edge_map.items():
-            if len(edge_list) > 1:
-                # Check for conflicting edge types
-                edge_types = [e.get('edge_type') for e in edge_list]
-                if len(set(edge_types)) > 1:
-                    errors.append(ValidationError(
-                        code="DUPLICATE_EDGE_CONFLICT",
-                        message=f"Conflicting edge types between '{source}' and '{target}': {edge_types}"
-                    ))
+        # 2) Report duplicates if the exact same edge appears more than once
+        for signature, count in edge_signatures.items():
+            if count > 1:
+                src, tgt, etype = signature[:3]
+                errors.append(ValidationError(
+                    code="DUPLICATE_EDGE",
+                    message=(
+                        f"Duplicate {etype} edge between '{src}' and '{tgt}' "
+                        f"({count} instances)"
+                    )
+                ))
+        
+        # 3) Gather types per component-pair
+        component_pairs = defaultdict(set)
+        for source, target, edge_data in dag.edges(data=True):
+            component_pairs[(source, target)].add(
+                edge_data.get('edge_type', 'unknown')
+            )
+        
+        # 4) Flag any pair that has BOTH data and control
+        for (src, tgt), types in component_pairs.items():
+            if 'data' in types and 'control' in types:
+                errors.append(ValidationError(
+                    code="MIXED_EDGE_TYPES",
+                    message=(
+                        f"Components '{src}' and '{tgt}' cannot be connected "
+                        "by both data and control edges."
+                    )
+                ))
         
         return errors
     
@@ -404,17 +493,18 @@ class StructureValidator:
                     recommendation="Consider using iterator pattern or reducing fan-out"
                 ))
         
-        # Check path depth
+        # Check path depth - only if DAG is acyclic
         try:
-            longest_path = nx.dag_longest_path_length(dag)
-            if longest_path > self.MAX_PATH_DEPTH_THRESHOLD:
-                warnings.append(ValidationWarning(
-                    code="DEEP_NESTING",
-                    message=f"DAG has maximum path depth of {longest_path} (>{self.MAX_PATH_DEPTH_THRESHOLD}), may impact readability",
-                    recommendation="Consider restructuring to reduce sequential dependencies"
-                ))
+            if nx.is_directed_acyclic_graph(dag):
+                longest_path = nx.dag_longest_path_length(dag)
+                if longest_path > self.MAX_PATH_DEPTH_THRESHOLD:
+                    warnings.append(ValidationWarning(
+                        code="DEEP_NESTING",
+                        message=f"DAG has maximum path depth of {longest_path} (>{self.MAX_PATH_DEPTH_THRESHOLD}), may impact readability",
+                        recommendation="Consider restructuring to reduce sequential dependencies"
+                    ))
         except nx.NetworkXError:
-            # Not a DAG or other error
+            # Skip path depth check if any NetworkX error occurs
             pass
         
         return warnings
