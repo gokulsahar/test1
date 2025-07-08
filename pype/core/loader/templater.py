@@ -30,11 +30,6 @@ def resolve_template_string(template: str, context: Dict[str, Any]) -> str:
         if re.search(SECRET_VAR_PATTERN, resolved):
             raise NotImplementedError("Secret resolution via CyberArk not yet implemented")
         
-        # Check for unresolved global variables (should be resolved at runtime)
-        if re.search(GLOBAL_VAR_PATTERN, resolved):
-            # Global variables are resolved at runtime, not compile time
-            pass
-        
         return resolved
         
     except re.error as e:
