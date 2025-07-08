@@ -27,10 +27,9 @@ class MultiInputViolationError(PortResolutionError):
 class PortResolver:
     """Resolves wildcard ports and validates port connectivity."""
     
-    def __init__(self, registry: ComponentRegistry, max_wildcard_ports: int = 100):
+    def __init__(self, registry: ComponentRegistry):
         """Initialize with component registry and wildcard expansion limits."""
         self.registry = registry
-        self.max_wildcard_ports = max_wildcard_ports
     
     def resolve_ports(self, dag: nx.DiGraph) -> Tuple[nx.DiGraph, List[str]]:
         """
@@ -46,8 +45,6 @@ class PortResolver:
         
         # Step 1: Expand wildcard ports based on actual usage
         port_mapping = self._expand_wildcard_ports(dag)
-        wildcard_errors = self._validate_wildcard_expansions(port_mapping)
-        errors.extend(wildcard_errors)
         
         # Step 2: Update DAG with concrete ports
         self._update_dag_with_concrete_ports(dag, port_mapping)
@@ -66,7 +63,7 @@ class PortResolver:
         
         return dag, errors
     
-    def _expand_wildcard_ports(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[str]]]:
+    def _expand_wildcard_ports(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[str]]]:#return {compName:{inP:[],outP[]},..}
         """Expand wildcard ports to concrete ports based on actual connections."""
         port_mapping = {}
         
@@ -99,19 +96,6 @@ class PortResolver:
             'output_ports': sorted(list(output_ports))
         }
     
-    def _validate_wildcard_expansions(self, port_mapping: Dict[str, Dict[str, List[str]]]) -> List[str]:
-        """Validate wildcard expansions don't exceed limits."""
-        errors = []
-        
-        for component_name, ports in port_mapping.items():
-            for port_type, concrete_ports in ports.items():
-                if len(concrete_ports) > self.max_wildcard_ports:
-                    errors.append(
-                        f"Component '{component_name}' exceeds wildcard limit "
-                        f"({len(concrete_ports)} > {self.max_wildcard_ports}) for {port_type}"
-                    )
-        
-        return errors
     
     def _validate_port_connectivity(self, dag: nx.DiGraph) -> List[str]:
         """Validate all data edges reference valid ports."""
@@ -235,17 +219,14 @@ class PortResolver:
         
         for port in original_ports:
             if self._is_wildcard_port(port):
-                # Replace wildcard with concrete ports that match the prefix
                 prefix = self._extract_wildcard_prefix(port)
                 matching_concrete = [
                     cp for cp in concrete_ports 
                     if cp.startswith(prefix) if prefix
                 ]
-                # Only add if there are actual connections (simplest fix)
                 if matching_concrete:
                     result.extend(sorted(matching_concrete))
             else:
-                # Keep non-wildcard ports as-is
                 result.append(port)
         
         return result
