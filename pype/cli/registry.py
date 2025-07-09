@@ -32,7 +32,7 @@ def register_component_command(register_all: bool, component_name: str, from_pac
                     name = comp['name'] 
                     click.echo(f"  {name} ({category})")
             else:
-                click.echo("⚠ No components found to register")
+                click.echo(" No components found to register")
                 
         elif component_name:
             if from_package:

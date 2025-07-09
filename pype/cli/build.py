@@ -101,7 +101,7 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
             click.echo(f"  ✓ Created DAG with {len(plan_result.dag.nodes())} nodes")
             click.echo(f"  ✓ Detected {len(plan_result.subjob_components)} subjobs")
             if plan_result.validation_warnings:
-                click.echo(f"  ⚠ {len(plan_result.validation_warnings)} warnings")
+                click.echo(f"   {len(plan_result.validation_warnings)} warnings")
         
         # Step 4: Create .pjob file
         if verbose >= 2:
@@ -229,7 +229,7 @@ def _show_build_summary(plan_result, verbose_level: int):
         if plan_result.validation_warnings:
             click.echo(f"\nWarnings ({len(plan_result.validation_warnings)}):")
             for warning in plan_result.validation_warnings[:5]:  # Show first 5
-                click.echo(f"  ⚠ {warning.message}")
+                click.echo(f"   {warning.message}")
             if len(plan_result.validation_warnings) > 5:
                 click.echo(f"  ... and {len(plan_result.validation_warnings) - 5} more")
     
