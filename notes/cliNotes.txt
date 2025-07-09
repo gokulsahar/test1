@@ -1,0 +1,123 @@
+Pype CLI - Command Line Reference
+=================================
+
+Version: 0.1.0
+Description: DataPY ETL Framework - CLI-first, YAML-driven ETL pipeline engine
+
+USAGE:
+    pype [COMMAND] [OPTIONS]
+
+GLOBAL OPTIONS:
+    --help, -h           Show this help message
+    --version            Show version info
+
+COMMANDS:
+---------
+
+1. build
+    Usage:
+        pype build
+
+    Description:
+        Build the ETL pipeline from configuration.
+
+------------------------------------------------------------
+
+2. inspect
+    Usage:
+        pype inspect <pjob_file> [OPTIONS]
+
+    Arguments:
+        pjob_file         Path to the .pjob file (required)
+
+    Options:
+        --extract <dir>   Extract contents to a target directory
+        --show-yaml       Print the original YAML content inside the .pjob
+        --show-dag        Print detailed DAG structure from the .pjob
+
+    Description:
+        Inspect the contents of a .pjob file, showing DAG info, YAML, or extracting files.
+
+------------------------------------------------------------
+
+3. register-component  (alias: register)
+    Usage:
+        pype register-component
+        pype register
+
+    Description:
+        Register a new ETL component in the registry.
+
+------------------------------------------------------------
+
+4. list-components  (alias: list)
+    Usage:
+        pype list-components
+        pype list
+
+    Description:
+        List all registered ETL components.
+
+------------------------------------------------------------
+
+5. component-info  (alias: info)
+    Usage:
+        pype component-info
+        pype info
+
+    Description:
+        Display detailed information about a registered component.
+
+------------------------------------------------------------
+
+6. delete-component
+    Usage:
+        pype delete-component
+
+    Description:
+        Delete a component from the registry.
+
+------------------------------------------------------------
+
+7. run
+    Usage:
+        pype run <job_file> [OPTIONS]
+
+    Arguments:
+        job_file           Path to the .pjob file (required)
+
+    Options:
+        --context <file>   Path to a JSON context file
+        --resume           Resume from last checkpoint if available
+
+    Description:
+        Placeholder for executing a .pjob file. (Phase 2 - Not implemented)
+
+------------------------------------------------------------
+
+8. create
+    Usage:
+        pype create <job_name> [OPTIONS]
+
+    Arguments:
+        job_name           Name of the job to create
+
+    Options:
+        --template [basic|etl|ml]    Type of job template (default: basic)
+        --output <dir>               Target output directory
+
+    Description:
+        Create a new job using a predefined template. (Phase 6 - Not implemented)
+
+------------------------------------------------------------
+
+9. pack
+    Usage:
+        pype pack <input_dir> <output_file>
+
+    Arguments:
+        input_dir          Path to job folder
+        output_file        Destination .pjob file
+
+    Description:
+        Package job assets into a .pjob file for sharing or deployment. (Phase 6 - Not implemented)

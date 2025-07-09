@@ -129,14 +129,41 @@ def _show_dag_summary(zf):
 
 
 def _show_detailed_dag_info(zf):
-    """Show detailed DAG information."""
-    click.echo("DAG Details:")
+    """Show detailed DAG information with visualization."""
+    try:
+        import msgpack
+        dag_data = msgpack.unpackb(zf.read('dag.msgpack'), raw=False)
+        
+        # Try to get subjob data if available
+        subjob_data = None
+        if 'subjob_metadata.msgpack' in zf.namelist():
+            subjob_data = msgpack.unpackb(zf.read('subjob_metadata.msgpack'), raw=False)
+        
+        # Import and use the visualizer
+        from pype.cli.dag_visualizer import visualize_dag_interactive
+        visualize_dag_interactive(dag_data, subjob_data)
+                
+    except ImportError as e:
+        if 'msgpack' in str(e):
+            click.echo("  Install msgpack to see DAG details: pip install msgpack")
+        else:
+            click.echo(f"  Error importing visualizer: {e}")
+            # Fallback to simple display
+            _show_simple_dag_fallback(zf)
+    except Exception as e:
+        click.echo(f"  Error reading DAG: {e}")
+        _show_simple_dag_fallback(zf)
+
+
+def _show_simple_dag_fallback(zf):
+    """Fallback simple DAG display if visualizer fails."""
     try:
         import msgpack
         dag_data = msgpack.unpackb(zf.read('dag.msgpack'), raw=False)
         nodes = dag_data.get('nodes', [])
         links = dag_data.get('links', [])
         
+        click.echo("DAG Details (Simple View):")
         click.echo(f"  Total Nodes: {len(nodes)}")
         click.echo(f"  Total Links: {len(links)}")
         click.echo()
@@ -181,10 +208,8 @@ def _show_detailed_dag_info(zf):
             for link in sorted(control_links):
                 click.echo(link)
                 
-    except ImportError:
-        click.echo("  Install msgpack to see DAG details: pip install msgpack")
     except Exception as e:
-        click.echo(f"  Error reading DAG: {e}")
+        click.echo(f"  Fallback display also failed: {e}")
 
 
 def _show_execution_metadata(zf):
