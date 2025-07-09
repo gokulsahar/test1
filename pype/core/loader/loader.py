@@ -34,7 +34,7 @@ class ComponentModel(BaseModel):
 
 class ConnectionsModel(BaseModel):
     """Pydantic model for connections definition."""
-    data: Dict[str, Any] = Field(default_factory=list)
+    data: List[str] = Field(default_factory=list)
     control: List[str] = Field(default_factory=list)
 
 
