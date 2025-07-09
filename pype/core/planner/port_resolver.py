@@ -88,8 +88,8 @@ class PortResolver:
             # Step 2: Update DAG with concrete ports
             self._update_dag_ports(dag, port_mapping)
             
-            # Step 3: Validate all port connections (single pass with cached matchers)
-            errors.extend(self._validate_all_connections_optimized(dag))
+            # Step 3: Validate all port connections
+            errors.extend(self._validate_all_connections(dag))
             
             # Step 4: Add optimization metadata
             self._add_metadata(dag, port_mapping)
@@ -175,7 +175,7 @@ class PortResolver:
     
     # === VALIDATION===
     
-    def _validate_all_connections_optimized(self, dag: nx.DiGraph) -> List[str]:
+    def _validate_all_connections(self, dag: nx.DiGraph) -> List[str]:
         """Single-pass validation with cached WildcardMatchers per component."""
         errors = []
         connection_counts: Dict[Tuple[str, str], int] = Counter()
@@ -194,22 +194,22 @@ class PortResolver:
             # Track connections using tuple keys
             connection_counts[(target, target_port)] += 1
             
-            # Validate both ports with cached matchers
-            errors.extend(self._validate_port_with_cache(
+            # Validate both ports 
+            errors.extend(self._validate_port(
                 source, source_port, 'output', dag, component_matchers
             ))
-            errors.extend(self._validate_port_with_cache(
+            errors.extend(self._validate_port(
                 target, target_port, 'input', dag, component_matchers
             ))
         
         # Validate multi-input constraints using cached matchers
-        errors.extend(self._validate_multi_input_with_cache(
+        errors.extend(self._validate_multi_input(
             dag, connection_counts, component_matchers
         ))
         
         return errors
     
-    def _validate_port_with_cache(self, component: str, port: str, port_type: str, 
+    def _validate_port(self, component: str, port: str, port_type: str, 
                                  dag: nx.DiGraph, matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
         """Validate port using cached WildcardMatcher."""
         errors = []
@@ -246,7 +246,7 @@ class PortResolver:
         
         return errors
     
-    def _validate_multi_input_with_cache(self, dag: nx.DiGraph, 
+    def _validate_multi_input(self, dag: nx.DiGraph, 
                                         connection_counts: Dict[Tuple[str, str], int],
                                         matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
         """Validate multi-input constraints using cached matchers."""
@@ -287,9 +287,9 @@ class PortResolver:
     def _add_metadata(self, dag: nx.DiGraph, port_mapping: Dict[str, Dict[str, List[str]]]) -> None:
         """Add port mapping metadata for runtime optimization."""
         dag.graph['port_mapping'] = port_mapping
-        dag.graph['merge_requirements'] = self._find_merge_requirements_optimized(dag)
+        dag.graph['merge_requirements'] = self._find_merge_requirements(dag)
     
-    def _find_merge_requirements_optimized(self, dag: nx.DiGraph) -> Dict[str, Dict[str, str]]:
+    def _find_merge_requirements(self, dag: nx.DiGraph) -> Dict[str, Dict[str, str]]:
         """Find ports that need data merging using cached matchers."""
         merge_requirements = {}
         input_counts: Dict[Tuple[str, str], int] = Counter()
