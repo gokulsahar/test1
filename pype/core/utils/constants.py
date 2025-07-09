@@ -42,3 +42,7 @@ GLOBAL_VAR_PATTERN = rf'\{{\{{\s*([a-zA-Z_][a-zA-Z0-9_]*){GLOBAL_VAR_DELIMITER}(
 
 JOBLET_ROOT = Path(__file__).resolve().parents[3] / "joblets"
 JOBLET_EXTENSION = ".joblet.yaml"
+
+
+
+PORT_NAME_RE = r'^[a-zA-Z0-9_]+$'

@@ -1,35 +1,73 @@
 import re
 import networkx as nx
 from typing import Dict, List, Tuple, Any, Optional
-from pype.core.registry.component_registry import ComponentRegistry
+from collections import defaultdict, Counter
+from pype.core.utils.constants import PORT_NAME_RE
+
+# Pre-compiled regex patterns for performance
+_PORT_NAME_RE = re.compile(PORT_NAME_RE)
 
 
 class PortResolutionError(Exception):
-    """Base class for port resolution errors."""
+    """Fatal port resolution error that prevents execution."""
     pass
 
 
-class WildcardLimitExceededError(PortResolutionError):
-    """Raised when wildcard expansion exceeds maximum limit."""
-    pass
-
-
-class InvalidPortConnectionError(PortResolutionError):
-    """Raised when port connection is invalid."""
-    pass
-
-
-class MultiInputViolationError(PortResolutionError):
-    """Raised when allow_multi_in constraint is violated."""
-    pass
+class WildcardMatcher:
+    """Efficient wildcard pattern matcher with strict validation semantics."""
+    
+    def __init__(self, patterns: List[str]):
+        """Initialize with list of patterns (wildcard and exact)."""
+        self.exact_ports = set()
+        self.wildcard_patterns = []
+        self._validation_errors = []
+        
+        for pattern in patterns:
+            if pattern.endswith('*'):
+                prefix = pattern[:-1]
+                if not prefix:  # Collect bare "*" as validation error
+                    self._validation_errors.append(f"Invalid wildcard pattern: '{pattern}' (bare asterisk not allowed)")
+                    continue
+                self.wildcard_patterns.append((prefix, self._compile_underscore_regex(prefix)))
+            else:
+                self.exact_ports.add(pattern)
+    
+    def get_validation_errors(self) -> List[str]:
+        """Get any validation errors from pattern initialization."""
+        return self._validation_errors.copy()
+    
+    def get_wildcard_prefix(self, port: str) -> Optional[str]:
+        """Return wildcard prefix if port matches a VALID wildcard pattern."""
+        for prefix, regex in self.wildcard_patterns:
+            if regex.fullmatch(port):  # Only valid expansions (with underscore)
+                return prefix
+        return None
+    
+    def exists(self, port: str) -> bool:
+        """Check if port exists with valid syntax (exact match or valid wildcard expansion)."""
+        return port in self.exact_ports or self.get_wildcard_prefix(port) is not None
+    
+    def uses_wildcard(self, port: str) -> bool:
+        """Check if port uses a valid wildcard expansion."""
+        return self.get_wildcard_prefix(port) is not None
+    
+    def matches_any_wildcard_prefix(self, port: str) -> bool:
+        """Check if port starts with any wildcard prefix (for merging logic)."""
+        for prefix, _ in self.wildcard_patterns:
+            if port.startswith(prefix):
+                return True
+        return False
+    
+    @staticmethod
+    def _compile_underscore_regex(prefix: str) -> re.Pattern:
+        """Compile regex that enforces underscore syntax for wildcard ports."""
+        escaped_prefix = re.escape(prefix)
+        pattern = f"^{escaped_prefix}_(?:{PORT_NAME_RE})$"
+        return re.compile(pattern)
 
 
 class PortResolver:
     """Resolves wildcard ports and validates port connectivity."""
-    
-    def __init__(self, registry: ComponentRegistry):
-        """Initialize with component registry and wildcard expansion limits."""
-        self.registry = registry
     
     def resolve_ports(self, dag: nx.DiGraph) -> Tuple[nx.DiGraph, List[str]]:
         """
@@ -43,354 +81,244 @@ class PortResolver:
         """
         errors = []
         
-        # Step 1: Expand wildcard ports based on actual usage
-        port_mapping = self._expand_wildcard_ports(dag)
-        
-        # Step 2: Update DAG with concrete ports
-        self._update_dag_with_concrete_ports(dag, port_mapping)
-        
-        # Step 3: Validate all port connectivity
-        connectivity_errors = self._validate_port_connectivity(dag)
-        errors.extend(connectivity_errors)
-        
-        # Step 4: Validate multi-input constraints
-        multi_input_errors = self._validate_multi_input_constraints(dag)
-        errors.extend(multi_input_errors)
-        
-        # Step 5: Add port mapping metadata for runtime optimization
-        if port_mapping:
-            self._add_port_mapping_metadata(dag, port_mapping)
+        try:
+            # Step 1: Find concrete ports from actual connections
+            port_mapping = self._find_concrete_ports(dag)
+            
+            # Step 2: Update DAG with concrete ports
+            self._update_dag_ports(dag, port_mapping)
+            
+            # Step 3: Validate all port connections (single pass with cached matchers)
+            errors.extend(self._validate_all_connections_optimized(dag))
+            
+            # Step 4: Add optimization metadata
+            self._add_metadata(dag, port_mapping)
+            
+        except PortResolutionError as e:
+            errors.append(str(e))
         
         return dag, errors
     
-    def _expand_wildcard_ports(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[str]]]:#return {compName:{inP:[],outP[]},..}
-        """Expand wildcard ports to concrete ports based on actual connections."""
-        port_mapping = {}
+    # === CORE LOGIC ===
+    
+    def _find_concrete_ports(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[str]]]:
+        """edge scan to find concrete ports."""
+        inputs_by_node = defaultdict(set)
+        outputs_by_node = defaultdict(set)
         
-        for component_name in dag.nodes():
-            concrete_ports = self._find_concrete_ports_for_component(dag, component_name)
-            
-            if concrete_ports['input_ports'] or concrete_ports['output_ports']:
-                port_mapping[component_name] = concrete_ports
+        # Single pass through edges - O(E) instead of O(N*E)
+        for source, target, edge_data in dag.edges(data=True):
+            if edge_data.get('edge_type') == 'data':
+                source_port = edge_data.get('source_port')
+                target_port = edge_data.get('target_port')
                 
+                # Collect missing metadata as validation errors instead of raising
+                if source_port is None:
+                    raise PortResolutionError(f"Data edge {source} -> {target} missing source_port")
+                if target_port is None:
+                    raise PortResolutionError(f"Data edge {source} -> {target} missing target_port")
+                
+                outputs_by_node[source].add(source_port)
+                inputs_by_node[target].add(target_port)
+        
+        # Build mapping only for nodes with actual ports
+        port_mapping = {}
+        for node in dag.nodes():
+            input_ports = sorted(inputs_by_node[node])
+            output_ports = sorted(outputs_by_node[node])
+            
+            if input_ports or output_ports:
+                port_mapping[node] = {
+                    'input_ports': input_ports,
+                    'output_ports': output_ports
+                }
+        
         return port_mapping
     
-    def _find_concrete_ports_for_component(self, dag: nx.DiGraph, component_name: str) -> Dict[str, List[str]]:
-        """Find all concrete ports used by a component in data edges."""
-        input_ports = set()
-        output_ports = set()
-        
-        # Scan all data edges to find concrete port usage
-        for source, target, edge_data in dag.edges(data=True):
-            if edge_data.get('edge_type') == 'data':
-                source_port = edge_data.get('source_port')
-                target_port = edge_data.get('target_port')
-                
-                if source == component_name and source_port:
-                    output_ports.add(source_port)
-                if target == component_name and target_port:
-                    input_ports.add(target_port)
-        
-        return {
-            'input_ports': sorted(list(input_ports)),
-            'output_ports': sorted(list(output_ports))
-        }
+    def _update_dag_ports(self, dag: nx.DiGraph, port_mapping: Dict[str, Dict[str, List[str]]]) -> None:
+        """Update DAG nodes with resolved concrete ports using cached matchers."""
+        for component_name, ports in port_mapping.items():
+            node_data = dag.nodes[component_name]
+            
+            # Update input ports with unified wildcard logic
+            original_inputs = node_data.get('input_ports', [])
+            node_data['input_ports'] = self._merge_ports_with_matcher(
+                original_inputs, ports.get('input_ports', [])
+            )
+            
+            # Update output ports with unified wildcard logic
+            original_outputs = node_data.get('output_ports', [])
+            node_data['output_ports'] = self._merge_ports_with_matcher(
+                original_outputs, ports.get('output_ports', [])
+            )
     
+    def _merge_ports_with_matcher(self, original_ports: List[str], concrete_ports: List[str]) -> List[str]:
+        """Merge ports using WildcardMatcher for consistent wildcard logic."""
+        if not concrete_ports:
+            return original_ports
+        
+        # Create matcher from original patterns
+        matcher = WildcardMatcher(original_ports)
+        result = []
+        
+        # Add exact ports that exist in original
+        for port in original_ports:
+            if not port.endswith('*'):
+                result.append(port)
+        
+        # Add concrete ports that match wildcard patterns
+        for concrete_port in concrete_ports:
+            if matcher.matches_any_wildcard_prefix(concrete_port):
+                result.append(concrete_port)
+        
+        return sorted(set(result))  # Remove duplicates and sort
     
-    def _validate_port_connectivity(self, dag: nx.DiGraph) -> List[str]:
-        """Validate all data edges reference valid ports."""
+    # === VALIDATION===
+    
+    def _validate_all_connections_optimized(self, dag: nx.DiGraph) -> List[str]:
+        """Single-pass validation with cached WildcardMatchers per component."""
         errors = []
+        connection_counts: Dict[Tuple[str, str], int] = Counter()
         
-        # Track connections per component per port for duplicate validation
-        port_connections = {}
+        # Cache matchers per component to avoid rebuilding
+        component_matchers: Dict[Tuple[str, str], WildcardMatcher] = {}
         
+        # Single pass through data edges
         for source, target, edge_data in dag.edges(data=True):
-            if edge_data.get('edge_type') == 'data':
-                source_port = edge_data.get('source_port')
-                target_port = edge_data.get('target_port')
+            if edge_data.get('edge_type') != 'data':
+                continue
                 
-                # Track connections for duplicate validation
-                self._track_port_connection(port_connections, target, target_port, 'input')
-                self._track_port_connection(port_connections, source, source_port, 'output')
-                
-                # Validate source port exists and format
-                source_errors = self._validate_component_port(
-                    source, source_port, 'output', dag
-                )
-                errors.extend(source_errors)
-                
-                # Validate target port exists and format
-                target_errors = self._validate_component_port(
-                    target, target_port, 'input', dag
-                )
-                errors.extend(target_errors)
+            source_port = edge_data.get('source_port')
+            target_port = edge_data.get('target_port')
+            
+            # Track connections using tuple keys
+            connection_counts[(target, target_port)] += 1
+            
+            # Validate both ports with cached matchers
+            errors.extend(self._validate_port_with_cache(
+                source, source_port, 'output', dag, component_matchers
+            ))
+            errors.extend(self._validate_port_with_cache(
+                target, target_port, 'input', dag, component_matchers
+            ))
         
-        # Validate connection constraints
-        constraint_errors = self._validate_connection_constraints(dag, port_connections)
-        errors.extend(constraint_errors)
+        # Validate multi-input constraints using cached matchers
+        errors.extend(self._validate_multi_input_with_cache(
+            dag, connection_counts, component_matchers
+        ))
         
         return errors
     
-    def _validate_component_port(self, component_name: str, port_name: str, 
-                                port_type: str, dag: nx.DiGraph) -> List[str]:
-        """Validate a specific port exists in component's registry metadata."""
+    def _validate_port_with_cache(self, component: str, port: str, port_type: str, 
+                                 dag: nx.DiGraph, matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
+        """Validate port using cached WildcardMatcher."""
         errors = []
         
-        # Get component registry metadata
-        component_info = self._get_component_port_info(dag, component_name)
-        if not component_info:
-            errors.append(f"Component '{component_name}' metadata not found")
+        # Get component metadata
+        node_data = dag.nodes.get(component, {})
+        valid_ports = node_data.get(f"{port_type}_ports", [])
+        
+        if not valid_ports:
+            errors.append(f"Component '{component}' metadata not found")
             return errors
         
-        # Validate port name format first
-        format_errors = self._validate_port_name_syntax(port_name, component_info, port_type)
-        errors.extend(format_errors)
+        # Validate port name format using pre-compiled regex
+        if not _PORT_NAME_RE.fullmatch(port):
+            errors.append(f"Invalid port name format: '{port}' (use alphanumeric + underscore)")
+            return errors
         
-        # Check if port exists in appropriate port list
-        port_list_key = f"{port_type}_ports"
-        valid_ports = component_info.get(port_list_key, [])
+        # Get or create cached matcher for this component and port type
+        cache_key = (component, port_type)
+        if cache_key not in matcher_cache:
+            matcher = WildcardMatcher(valid_ports)
+            # Add any pattern validation errors
+            errors.extend([f"Component '{component}': {err}" for err in matcher.get_validation_errors()])
+            matcher_cache[cache_key] = matcher
+        else:
+            matcher = matcher_cache[cache_key]
         
-        # Check for exact match or wildcard match
-        if not self._port_exists_in_list(port_name, valid_ports):
+        # Check existence with strict validation (only valid expansions)
+        if not matcher.exists(port):
             errors.append(
-                f"Component '{component_name}' does not have {port_type} port '{port_name}'. "
-                f"Available {port_type} ports: {valid_ports}"
+                f"Component '{component}' has no valid {port_type} port '{port}'. "
+                f"Available: {valid_ports}"
             )
         
         return errors
     
-    def _port_exists_in_list(self, port_name: str, valid_ports: List[str]) -> bool:
-        """Check if port exists in list, considering wildcards."""
-        # Direct match
-        if port_name in valid_ports:
-            return True
-        
-        # Check wildcard patterns
-        for valid_port in valid_ports:
-            if self._is_wildcard_port(valid_port):
-                prefix = self._extract_wildcard_prefix(valid_port)
-                if prefix and port_name.startswith(prefix):
-                    return True
-        
-        return False
-    
-    def _validate_multi_input_constraints(self, dag: nx.DiGraph) -> List[str]:
-        """Validate allow_multi_in constraints are respected."""
-        # This method is now replaced by _validate_connection_constraints
-        # Keeping empty for backward compatibility
-        return []
-    
-    def _get_component_port_info(self, dag: nx.DiGraph, component_name: str) -> Optional[Dict[str, Any]]:
-        """Extract port information from component node metadata."""
-        node_data = dag.nodes.get(component_name, {})
-        
-        return {
-            'input_ports': node_data.get('input_ports', []),
-            'output_ports': node_data.get('output_ports', []),
-            'allow_multi_in': node_data.get('allow_multi_in', False)
-        }
-    
-    def _update_dag_with_concrete_ports(self, dag: nx.DiGraph, 
-                                      port_mapping: Dict[str, Dict[str, List[str]]]) -> None:
-        """Update DAG nodes with resolved concrete ports."""
-        for component_name, ports in port_mapping.items():
-            if component_name in dag.nodes:
-                node_data = dag.nodes[component_name]
-                
-                # Get original ports from registry metadata
-                original_input_ports = node_data.get('input_ports', [])
-                original_output_ports = node_data.get('output_ports', [])
-                
-                # Update with concrete ports, removing unused wildcards
-                updated_input_ports = self._merge_concrete_ports(
-                    original_input_ports, ports.get('input_ports', [])
-                )
-                updated_output_ports = self._merge_concrete_ports(
-                    original_output_ports, ports.get('output_ports', [])
-                )
-                
-                dag.nodes[component_name]['input_ports'] = updated_input_ports
-                dag.nodes[component_name]['output_ports'] = updated_output_ports
-    
-    def _merge_concrete_ports(self, original_ports: List[str], 
-                            concrete_ports: List[str]) -> List[str]:
-        """Merge original ports with concrete ports, handling wildcards."""
-        result = []
-        
-        for port in original_ports:
-            if self._is_wildcard_port(port):
-                prefix = self._extract_wildcard_prefix(port)
-                matching_concrete = [
-                    cp for cp in concrete_ports 
-                    if cp.startswith(prefix) if prefix
-                ]
-                if matching_concrete:
-                    result.extend(sorted(matching_concrete))
-            else:
-                result.append(port)
-        
-        return result
-    
-    def _add_port_mapping_metadata(self, dag: nx.DiGraph, 
-                                 port_mapping: Dict[str, Dict[str, List[str]]]) -> None:
-        """Add port mapping metadata to DAG for runtime optimization."""
-        if not hasattr(dag.graph, 'port_mapping'):
-            dag.graph['port_mapping'] = {}
-        
-        dag.graph['port_mapping'].update(port_mapping)
-        
-        # Add merge requirements for engine
-        merge_requirements = self._identify_merge_requirements(dag)
-        if merge_requirements:
-            dag.graph['merge_requirements'] = merge_requirements
-    
-    def _validate_port_name_format(self, port_name: str) -> bool:
-        """Validate port name follows allowed patterns."""
-        if not port_name:
-            return False
-        
-        # Allow alphanumeric characters and underscores
-        pattern = r'^[a-zA-Z0-9_]+$'
-        return bool(re.match(pattern, port_name))
-    
-    def _is_wildcard_port(self, port_name: str) -> bool:
-        """Check if port name is a wildcard pattern."""
-        return port_name.endswith('*')
-    
-    def _extract_wildcard_prefix(self, port_name: str) -> Optional[str]:
-        """Extract prefix from wildcard port name."""
-        if self._is_wildcard_port(port_name):
-            return port_name[:-1]  # Remove the '*'
-        return None
-        return bool(re.match(pattern, port_name))
-    
-    def _validate_port_name_syntax(self, port_name: str, component_info: Dict[str, Any], 
-                                 port_type: str) -> List[str]:
-        """Validate port name syntax including wildcard patterns."""
+    def _validate_multi_input_with_cache(self, dag: nx.DiGraph, 
+                                        connection_counts: Dict[Tuple[str, str], int],
+                                        matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
+        """Validate multi-input constraints using cached matchers."""
         errors = []
         
-        # Basic format validation
-        if not self._validate_port_name_format(port_name):
-            errors.append(f"Invalid port name format: '{port_name}' (use alphanumeric + underscore)")
-            return errors
-        
-        # Check if this port should match a wildcard pattern
-        port_list_key = f"{port_type}_ports"
-        valid_ports = component_info.get(port_list_key, [])
-        
-        for valid_port in valid_ports:
-            if self._is_wildcard_port(valid_port):
-                prefix = self._extract_wildcard_prefix(valid_port)
-                if prefix and port_name.startswith(prefix):
-                    # This is a wildcard port, validate syntax
-                    if not self._validate_wildcard_port_syntax(port_name, valid_port):
-                        errors.append(
-                            f"Wildcard port '{port_name}' must follow pattern '{valid_port}' "
-                            f"(requires underscore: {prefix}_suffix)"
-                        )
-                    break
-        
-        return errors
-    
-    def _validate_wildcard_port_syntax(self, port_name: str, wildcard_pattern: str) -> bool:
-        """Validate wildcard port follows required underscore syntax."""
-        prefix = self._extract_wildcard_prefix(wildcard_pattern)
-        if not prefix:
-            return True  # Not a wildcard
-        
-        # Must be prefix_suffix (requires underscore)
-        expected_pattern = f"^{re.escape(prefix)}_[a-zA-Z0-9_]+$"
-        return bool(re.match(expected_pattern, port_name))
-    
-    def _track_port_connection(self, port_connections: Dict, component_name: str, 
-                             port_name: str, port_type: str) -> None:
-        """Track port connections for duplicate validation."""
-        if component_name not in port_connections:
-            port_connections[component_name] = {'input': {}, 'output': {}}
-        
-        if port_name not in port_connections[component_name][port_type]:
-            port_connections[component_name][port_type][port_name] = 0
-        
-        port_connections[component_name][port_type][port_name] += 1
-    
-    def _validate_connection_constraints(self, dag: nx.DiGraph, 
-                                       port_connections: Dict) -> List[str]:
-        """Validate connection constraints (multi-input, non-wildcard rules)."""
-        errors = []
-        
-        for component_name, connections in port_connections.items():
-            component_info = self._get_component_port_info(dag, component_name)
-            if not component_info:
+        for (component, port), count in connection_counts.items():
+            if count <= 1:
                 continue
+                
+            node_data = dag.nodes.get(component, {})
             
-            # Validate input connections only
-            for port_name, count in connections['input'].items():
-                if count > 1:  # Multiple connections to same input port
-                    is_wildcard = self._is_wildcard_used(port_name, component_info['input_ports'])
-                    
-                    if not is_wildcard:
-                        # Non-wildcard ports cannot have multiple connections
-                        errors.append(
-                            f"Non-wildcard input port '{component_name}.{port_name}' "
-                            f"cannot have multiple connections ({count} found)"
-                        )
-                    elif not component_info.get('allow_multi_in', False):
-                        # Wildcard ports need allow_multi_in=True for multiple connections
-                        errors.append(
-                            f"Wildcard input port '{component_name}.{port_name}' has {count} "
-                            f"connections but component has allow_multi_in=False"
-                        )
+            # Get or create cached matcher
+            cache_key = (component, 'input')
+            if cache_key not in matcher_cache:
+                input_ports = node_data.get('input_ports', [])
+                matcher_cache[cache_key] = WildcardMatcher(input_ports)
             
-            # Note: Output connections (fan-out) are always allowed for both wildcard and non-wildcard ports
+            matcher = matcher_cache[cache_key]
+            uses_wildcard = matcher.uses_wildcard(port)
+            
+            if not uses_wildcard:
+                # Non-wildcard ports cannot have multiple connections
+                errors.append(
+                    f"Non-wildcard input port '{component}.{port}' "
+                    f"cannot have multiple connections ({count} found)"
+                )
+            elif not node_data.get('allow_multi_in', False):
+                # Wildcard ports need allow_multi_in=True
+                errors.append(
+                    f"Component '{component}' has allow_multi_in=False but "
+                    f"wildcard port '{port}' has {count} connections"
+                )
         
         return errors
     
-    def _is_wildcard_used(self, port_name: str, valid_ports: List[str]) -> bool:
-        """Check if port name is being used as a wildcard expansion."""
-        for valid_port in valid_ports:
-            if self._is_wildcard_port(valid_port):
-                prefix = self._extract_wildcard_prefix(valid_port)
-                if prefix and port_name.startswith(prefix):
-                    return True
-        return False
+    # === UTILITIES ===
     
-    def _identify_merge_requirements(self, dag: nx.DiGraph) -> Dict[str, Dict[str, str]]:
-        """Identify which ports need data merging for engine preparation."""
+    def _add_metadata(self, dag: nx.DiGraph, port_mapping: Dict[str, Dict[str, List[str]]]) -> None:
+        """Add port mapping metadata for runtime optimization."""
+        dag.graph['port_mapping'] = port_mapping
+        dag.graph['merge_requirements'] = self._find_merge_requirements_optimized(dag)
+    
+    def _find_merge_requirements_optimized(self, dag: nx.DiGraph) -> Dict[str, Dict[str, str]]:
+        """Find ports that need data merging using cached matchers."""
         merge_requirements = {}
+        input_counts: Dict[Tuple[str, str], int] = Counter()
+        matcher_cache: Dict[str, WildcardMatcher] = {}
         
-        # Count connections to each input port
-        input_counts = {}
+        # Count connections to each input port using tuple keys
         for source, target, edge_data in dag.edges(data=True):
             if edge_data.get('edge_type') == 'data':
                 target_port = edge_data.get('target_port')
-                key = f"{target}.{target_port}"
-                
-                if key not in input_counts:
-                    input_counts[key] = 0
-                input_counts[key] += 1
+                input_counts[(target, target_port)] += 1
         
-        # Mark ports that need merging
-        for key, count in input_counts.items():
-            if count > 1:
-                component_name, port_name = key.split('.', 1)
-                component_info = self._get_component_port_info(dag, component_name)
+        # Mark ports needing merge
+        for (component, port), count in input_counts.items():
+            if count <= 1:
+                continue
                 
-                if (component_info and 
-                    component_info.get('allow_multi_in', False) and
-                    self._is_wildcard_used(port_name, component_info['input_ports'])):
-                    
-                    if component_name not in merge_requirements:
-                        merge_requirements[component_name] = {}
-                    merge_requirements[component_name][port_name] = 'merge_required'
+            node_data = dag.nodes.get(component, {})
+            
+            # Check if component allows multi-input and port uses wildcard
+            if node_data.get('allow_multi_in', False):
+                # Get or create cached matcher
+                if component not in matcher_cache:
+                    input_ports = node_data.get('input_ports', [])
+                    matcher_cache[component] = WildcardMatcher(input_ports)
+                
+                matcher = matcher_cache[component]
+                if matcher.uses_wildcard(port):
+                    if component not in merge_requirements:
+                        merge_requirements[component] = {}
+                    merge_requirements[component][port] = 'merge_required'
         
         return merge_requirements
-    
-    def _is_wildcard_port(self, port_name: str) -> bool:
-        """Check if port name is a wildcard pattern."""
-        return port_name.endswith('*')
-    
-    def _extract_wildcard_prefix(self, port_name: str) -> Optional[str]:
-        """Extract prefix from wildcard port name."""
-        if self._is_wildcard_port(port_name):
-            return port_name[:-1]  # Remove the '*'
-        return None
