@@ -60,7 +60,7 @@ class GraphBuilder:
         
         # Stop if any errors found
         if errors:
-            raise GraphBuildError(f"Graph construction failed: {'\n'.join(errors)}")
+            raise GraphBuildError("Graph construction failed:\n" + "\n".join(errors))
         
         # Create edges after validation passes
         self._create_data_edges(dag, job_model.connections.data)
