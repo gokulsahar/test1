@@ -85,7 +85,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "pattern": "^[a-zA-Z][a-zA-Z0-9]*$",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$",
             "maxLength": 64
           },
           "type": {
@@ -105,22 +105,11 @@
       "additionalProperties": false,
       "properties": {
         "data": {
-          "oneOf": [
-            {
-              "type": "object",
-              "patternProperties": {
-                "^[a-zA-Z][a-zA-Z0-9]*\\.[a-zA-Z][a-zA-Z0-9*_]*\\s*->\\s*[a-zA-Z][a-zA-Z0-9]*\\.[a-zA-Z][a-zA-Z0-9*_]*$": true
-              },
-              "additionalProperties": false
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-zA-Z][a-zA-Z0-9]*\\.[a-zA-Z][a-zA-Z0-9*_]*\\s*->\\s*[a-zA-Z][a-zA-Z0-9]*\\.[a-zA-Z][a-zA-Z0-9*_]*$"
-              }
-            }
-          ]
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_]*\\.[a-zA-Z][a-zA-Z0-9*_]*\\s*->\\s*[a-zA-Z][a-zA-Z0-9_]*\\.[a-zA-Z][a-zA-Z0-9*_]*$"
+          }
         },
         "control": {
           "type": "array",
@@ -128,11 +117,11 @@
             "type": "string",
             "anyOf": [
               {
-                "pattern": "^[a-zA-Z][a-zA-Z0-9]*\\s*\\(if\\d+\\)\\s*:\\s*\"[^\"]*\"\\s+[a-zA-Z][a-zA-Z0-9]*$",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9_]*\\s*\\(if\\d+\\)\\s*:\\s*\"[^\"]*\"\\s+[a-zA-Z][a-zA-Z0-9_]*$",
                 "description": "If control edge: component (if1): \"condition\" target"
               },
               {
-                "pattern": "^[a-zA-Z][a-zA-Z0-9]*\\s*\\((ok|error|parallelize|synchronise|subjob_ok|subjob_error)\\)\\s+[a-zA-Z][a-zA-Z0-9]*$",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9_]*\\s*\\((ok|error|parallelise|synchronise|subjob_ok|subjob_error)\\)\\s+[a-zA-Z][a-zA-Z0-9_]*$",
                 "description": "Regular control edge: component (trigger) target"
               }
             ]

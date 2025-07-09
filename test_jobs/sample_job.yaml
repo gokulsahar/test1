@@ -1,0 +1,96 @@
+job:
+  name: data_processing_pipeline
+  desc: Complex ETL pipeline demonstrating subjobs, parallelization, and control flows
+  version: 1.0.0
+  team: data-engineering
+  owner: test@company.com
+  created: "2025-07-09"
+
+job_config:
+  retries: 2
+  timeout: 1800
+  fail_strategy: halt
+  dask_config:
+    memory_limit: "2GB"
+    parallelism: 4
+    use_cluster: false
+
+components:
+  - name: extract_main
+    type: logging
+    params:
+      message: "Starting main data extraction for environment: {{context.environment}}"
+      level: "INFO"
+      delay_seconds: 1
+
+  - name: validate_data
+    type: logging
+    params:
+      message: "Validating extracted data - found {row_count} records"
+      level: "INFO"
+      delay_seconds: 2
+
+  - name: process_customers
+    type: logging
+    params:
+      message: "Processing customer data in parallel branch 1"
+      level: "INFO"
+      delay_seconds: 3
+
+  - name: process_orders
+    type: logging
+    params:
+      message: "Processing order data in parallel branch 2"
+      level: "INFO"
+      delay_seconds: 2
+
+  - name: merge_results
+    type: logging
+    params:
+      message: "Merging results from parallel processing"
+      level: "INFO"
+      delay_seconds: 1
+
+  - name: final_output
+    type: logging
+    params:
+      message: "Pipeline completed successfully at {timestamp}"
+      level: "INFO"
+
+  - name: error_handler
+    type: logging
+    params:
+      message: "Handling pipeline error - sending notification"
+      level: "ERROR"
+
+  - name: cleanup
+    type: logging
+    params:
+      message: "Performing cleanup operations"
+      level: "INFO"
+
+connections:
+  data:
+    - "extract_main.main -> validate_data.main"
+    - "validate_data.main -> process_customers.main"
+    - "validate_data.main -> process_orders.main"
+    - "process_customers.main -> merge_results.main"
+    - "process_orders.main -> merge_results.main"
+    - "merge_results.main -> final_output.main"
+
+  control:
+    - "extract_main (ok) validate_data"
+    - "validate_data (if1): \"row_count > 0\" process_customers"
+    - "validate_data (if2): \"row_count > 0\" process_orders"
+    - "validate_data (parallelise) process_customers"
+    - "validate_data (parallelise) process_orders"
+    - "process_customers (synchronise) merge_results"
+    - "process_orders (synchronise) merge_results"
+    - "merge_results (ok) final_output"
+    - "extract_main (error) error_handler"
+    - "validate_data (error) error_handler"
+    - "process_customers (error) error_handler"
+    - "process_orders (error) error_handler"
+    - "merge_results (error) error_handler"
+    - "merge_results (subjob_ok) cleanup"
+    - "error_handler (subjob_error) cleanup"

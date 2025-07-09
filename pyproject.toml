@@ -15,9 +15,9 @@ dependencies = [
     "pydantic",
     "click",
     "networkx", 
-    "pandas>=2.0.0",     # Updated for better compatibility with PipelineData
+    "pandas>=2.0.0",
     "numpy",
-    "dask[complete]>=2023.1.0",  # Updated for complete dask functionality
+    "dask[complete]>=2023.1.0",
     "msgpack",
     "requests",
     "typing_extensions",
@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-pype = "pype.cli.main:main"
+pype = "pype.cli.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
