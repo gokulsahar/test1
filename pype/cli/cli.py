@@ -20,6 +20,20 @@ def cli():
 # Build commands
 cli.add_command(build_command, name="build")
 
+@cli.command()
+@click.argument("pjob_file", type=click.Path(exists=True))
+@click.option("--extract", type=click.Path(), help="Extract contents to directory")
+@click.option("--show-yaml", is_flag=True, help="Show original YAML content")
+@click.option("--show-dag", is_flag=True, help="Show detailed DAG information")
+def inspect(pjob_file, extract, show_yaml, show_dag):
+    """Inspect contents of a .pjob file."""
+    try:
+        from pype.cli.inspect_pjob import inspect_pjob_cli
+        inspect_pjob_cli(pjob_file, extract, show_yaml, show_dag)
+    except Exception as e:
+        click.echo(f"Inspection failed: {e}")
+        raise click.Abort()
+
 # Registry commands  
 cli.add_command(register_component_command, name="register-component")
 cli.add_command(register_component_command, name="register")  # Shorter alias
@@ -89,7 +103,6 @@ def visualize(job_file, format, output, no_view, context):
             
     except ImportError as e:
         click.echo(f"Error: {e}")
-        click.echo("install graphviz")
         raise click.Abort()
     except (LoaderError, CriticalPlanningError, PlanningPhaseError) as e:
         click.echo(f"Job processing failed: {e}")
