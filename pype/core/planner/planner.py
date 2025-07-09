@@ -74,7 +74,7 @@ class JobPlanner:
         """
         self.registry = registry
         self.graph_builder = GraphBuilder(registry)
-        self.port_resolver = PortResolver(registry)
+        self.port_resolver = PortResolver()
         self.subjob_analyzer = SubjobAnalyzer()
         self.structure_validator = StructureValidator(registry)
         
