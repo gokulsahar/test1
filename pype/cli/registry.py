@@ -22,7 +22,7 @@ def register_component_command(register_all: bool, component_name: str, from_pac
             registered_count = registry.register_components_from_package()
             
             if registered_count > 0:
-                click.echo(f"✓ Successfully registered {registered_count} components")
+                click.echo(f" Successfully registered {registered_count} components")
                 
                 # Show registered components
                 components = registry.list_components()
@@ -39,9 +39,9 @@ def register_component_command(register_all: bool, component_name: str, from_pac
                 # Auto-discover specific component from package
                 success = registry.register_component_by_name(component_name)
                 if success:
-                    click.echo(f"✓ Registered component '{component_name}' from package")
+                    click.echo(f" Registered component '{component_name}' from package")
                 else:
-                    click.echo(f"✗ Component '{component_name}' not found in package")
+                    click.echo(f" Component '{component_name}' not found in package")
                     raise click.Abort()
             else:
                 click.echo("Manual component registration not yet implemented")
@@ -147,9 +147,9 @@ def delete_component_command(component_name: str, confirm: bool):
         # Delete component
         success = registry.delete_component(component_name)
         if success:
-            click.echo(f"✓ Deleted component '{component_name}'")
+            click.echo(f" Deleted component '{component_name}'")
         else:
-            click.echo(f"✗ Failed to delete component '{component_name}'")
+            click.echo(f" Failed to delete component '{component_name}'")
             raise click.Abort()
             
     except Exception as e:
@@ -180,7 +180,7 @@ def _show_components_table(components, verbose: bool):
             
             input_count = len(comp['input_ports'])
             output_count = len(comp['output_ports'])
-            ports = f"{input_count}→{output_count}"
+            ports = f"{input_count}->{output_count}"
             
             click.echo(f"{name:<20} {category:<12} {startable:<9} {multi_in:<8} {ports:<12} {description}")
         else:

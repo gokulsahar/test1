@@ -307,7 +307,7 @@ class StructureValidator:
             if etype == 'control' and trigger in ('ok', 'error') and is_iterator:
                 continue
 
-            # skip subjob_ok/error only if we're on the subjob’s first component
+            # skip subjob_ok/error only if we're on the subjobs first component
             if etype == 'control' and trigger in ('subjob_ok', 'subjob_error') and is_subjob_start:
                 continue
 

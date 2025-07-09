@@ -74,8 +74,8 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
             raise click.Abort()
         
         if verbose >= 2:
-            click.echo(f"  ✓ Loaded job '{job_model.job.name}' v{job_model.job.version}")
-            click.echo(f"  ✓ Found {len(job_model.components)} components")
+            click.echo(f"   Loaded job '{job_model.job.name}' v{job_model.job.version}")
+            click.echo(f"   Found {len(job_model.components)} components")
         
         # Step 2: Initialize registry and planner
         if verbose >= 2:
@@ -98,8 +98,8 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
             raise click.Abort()
         
         if verbose >= 2:
-            click.echo(f"  ✓ Created DAG with {len(plan_result.dag.nodes())} nodes")
-            click.echo(f"  ✓ Detected {len(plan_result.subjob_components)} subjobs")
+            click.echo(f"   Created DAG with {len(plan_result.dag.nodes())} nodes")
+            click.echo(f"   Detected {len(plan_result.subjob_components)} subjobs")
             if plan_result.validation_warnings:
                 click.echo(f"   {len(plan_result.validation_warnings)} warnings")
         
@@ -113,7 +113,7 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
         build_duration = time.perf_counter() - build_start
         
         if verbose >= 1:
-            click.echo(f"✓ Build completed in {build_duration:.2f}s")
+            click.echo(f" Build completed in {build_duration:.2f}s")
             click.echo(f"  Output: {pjob_file}")
             
             # Show summary

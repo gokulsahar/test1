@@ -18,7 +18,7 @@ def create_init_file(directory: Path, content: str = ""):
     if not init_file.exists():
         with open(init_file, 'w') as f:
             f.write(content)
-        print(f"✓ Created {init_file}")
+        print(f" Created {init_file}")
     else:
         print(f"- {init_file} already exists")
 
