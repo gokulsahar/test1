@@ -42,11 +42,61 @@ def run(job_file, context, resume):
 
 @cli.command()
 @click.argument("job_file", type=click.Path(exists=True))
-@click.option("--format", type=click.Choice(["text", "json", "graph"]), default="text")
-@click.option("--output", type=click.Path(), help="Output file for graph visualization")
-def plan(job_file, format, output):
-    """Analyze and visualize job execution plan (Phase 6 - Not implemented yet)."""
-    click.echo("Plan command will be implemented in Phase 6")
+@click.option("--format", type=click.Choice(["png", "svg", "pdf", "dot"]), default="png")
+@click.option("--output", type=click.Path(), help="Output file path")
+@click.option("--no-view", is_flag=True, help="Don't open the visualization file")
+@click.option("--context", type=click.Path(exists=True), help="Context JSON file")
+def visualize(job_file, format, output, no_view, context):
+    """Create a visual graph of the job DAG using Graphviz."""
+    try:
+        from pype.core.loader.loader import load_job_yaml, LoaderError
+        from pype.core.registry.component_registry import ComponentRegistry
+        from pype.core.planner.planner import JobPlanner, CriticalPlanningError, PlanningPhaseError
+        from pype.cli.graph_visualizer import visualize_dag, create_legend
+        import json
+        
+        # Load context if provided
+        context_data = {}
+        if context:
+            with open(context, 'r') as f:
+                context_data = json.load(f)
+        
+        click.echo(f"Loading and planning job: {job_file}")
+        
+        # Load and plan the job
+        job_model = load_job_yaml(Path(job_file), context_data)
+        registry = ComponentRegistry()
+        planner = JobPlanner(registry)
+        plan_result = planner.plan_job(job_model)
+        
+        # Create visualization
+        click.echo("Creating visualization...")
+        viz_path = visualize_dag(
+            plan_result.dag, 
+            output_path=Path(output) if output else None,
+            format=format,
+            view=not no_view
+        )
+        
+        click.echo(f"  Visualization created: {viz_path}")
+        click.echo(f"  Components: {len(plan_result.dag.nodes())}")
+        click.echo(f"  Connections: {len(plan_result.dag.edges())}")
+        click.echo(f"  Subjobs: {len(plan_result.subjob_components)}")
+        
+        # Show legend
+        if not no_view:
+            click.echo(create_legend())
+            
+    except ImportError as e:
+        click.echo(f"Error: {e}")
+        click.echo("install graphviz")
+        raise click.Abort()
+    except (LoaderError, CriticalPlanningError, PlanningPhaseError) as e:
+        click.echo(f"Job processing failed: {e}")
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Visualization failed: {e}")
+        raise click.Abort()
 
 
 @cli.command()
