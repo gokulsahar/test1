@@ -1,240 +1,306 @@
-#!/usr/bin/env python3
-"""
-Clean .pjob file inspector without emojis
-Usage: python inspect_pjob.py jobs/data_processing_pipeline.pjob
-"""
 import zipfile
 import json
-import sys
+import click
 from pathlib import Path
 
 
-def inspect_pjob(pjob_path, extract_to=None):
-    """Inspect contents of a .pjob file."""
-    pjob_path = Path(pjob_path)
+def inspect_pjob_cli(pjob_file, extract_to=None, show_yaml=False, show_dag=False):
+    """CLI wrapper for .pjob file inspection with Click integration."""
+    pjob_path = Path(pjob_file)
     
     if not pjob_path.exists():
-        print(f"Error: {pjob_path} not found")
-        return
+        click.echo(f"Error: {pjob_path} not found")
+        raise click.Abort()
     
-    print(f"Inspecting: {pjob_path}")
-    print("=" * 60)
+    click.echo(f"Inspecting: {pjob_path}")
+    click.echo("=" * 60)
     
     with zipfile.ZipFile(pjob_path, 'r') as zf:
         # List all files
-        print("Contents:")
+        click.echo("Contents:")
         total_size = 0
         for info in zf.infolist():
             size_kb = info.file_size / 1024
             total_size += info.file_size
-            print(f"  {info.filename:<25} {size_kb:>8.1f} KB")
-        print(f"  Total size: {total_size/1024:.1f} KB")
-        print()
+            click.echo(f"  {info.filename:<25} {size_kb:>8.1f} KB")
+        click.echo(f"  Total size: {total_size/1024:.1f} KB")
+        click.echo()
         
         # Show manifest
         if 'manifest.json' in zf.namelist():
-            print("Manifest:")
+            click.echo("Manifest:")
             try:
                 manifest = json.loads(zf.read('manifest.json'))
                 for key, value in manifest.items():
                     if key == 'checksums':
-                        print(f"  {key}: {len(value)} files")
+                        click.echo(f"  {key}: {len(value)} files")
                     else:
-                        print(f"  {key}: {value}")
+                        click.echo(f"  {key}: {value}")
             except Exception as e:
-                print(f"  Error reading manifest: {e}")
-            print()
+                click.echo(f"  Error reading manifest: {e}")
+            click.echo()
         
-        # Show original YAML snippet
+        # Show original YAML
         if 'job_original.yaml' in zf.namelist():
-            print("Original YAML (first 10 lines):")
-            try:
-                yaml_content = zf.read('job_original.yaml').decode('utf-8')
-                lines = yaml_content.split('\n')[:10]
-                for line in lines:
-                    print(f"  {line}")
-                if len(yaml_content.split('\n')) > 10:
-                    print(f"  ... ({len(yaml_content.split('\n'))} total lines)")
-            except Exception as e:
-                print(f"  Error reading YAML: {e}")
-            print()
+            if show_yaml:
+                click.echo("Original YAML (complete):")
+                try:
+                    yaml_content = zf.read('job_original.yaml').decode('utf-8')
+                    for line in yaml_content.split('\n'):
+                        click.echo(f"  {line}")
+                except Exception as e:
+                    click.echo(f"  Error reading YAML: {e}")
+            else:
+                click.echo("Original YAML (first 10 lines):")
+                try:
+                    yaml_content = zf.read('job_original.yaml').decode('utf-8')
+                    lines = yaml_content.split('\n')[:10]
+                    for line in lines:
+                        click.echo(f"  {line}")
+                    if len(yaml_content.split('\n')) > 10:
+                        click.echo(f"  ... ({len(yaml_content.split('\n'))} total lines)")
+                        click.echo("  Use --show-yaml to see complete content")
+                except Exception as e:
+                    click.echo(f"  Error reading YAML: {e}")
+            click.echo()
         
-        # Show DAG summary
+        # Show DAG summary or detailed info
         if 'dag.msgpack' in zf.namelist():
-            print("DAG Summary:")
-            try:
-                import msgpack
-                dag_data = msgpack.unpackb(zf.read('dag.msgpack'), raw=False)
-                nodes = dag_data.get('nodes', [])
-                links = dag_data.get('links', [])
-                print(f"  Nodes (Components): {len(nodes)}")
-                print(f"  Links (Connections): {len(links)}")
-                
-                # Show component types
-                if nodes:
-                    print("  Component Types:")
-                    types = {}
-                    for node in nodes:
-                        comp_type = node.get('component_type', 'unknown')
-                        types[comp_type] = types.get(comp_type, 0) + 1
-                    for comp_type, count in types.items():
-                        print(f"    - {comp_type}: {count}")
-                
-                # Show first few nodes
-                print("  First 3 Components:")
-                for node in nodes[:3]:
-                    node_id = node.get('id', 'unknown')
-                    comp_type = node.get('component_type', 'unknown')
-                    startable = "[START]" if node.get('startable') else ""
-                    print(f"    - {node_id} ({comp_type}) {startable}")
-                        
-            except ImportError:
-                print("  Install msgpack to see DAG details: pip install msgpack")
-            except Exception as e:
-                print(f"  Error reading DAG: {e}")
-            print()
+            if show_dag:
+                _show_detailed_dag_info(zf)
+            else:
+                _show_dag_summary(zf)
+            click.echo()
             
         # Show execution metadata
         if 'execution_metadata.msgpack' in zf.namelist():
-            print("Execution Metadata:")
-            try:
-                import msgpack
-                exec_data = msgpack.unpackb(zf.read('execution_metadata.msgpack'), raw=False)
-                
-                startable = exec_data.get('startable_components', [])
-                resources = exec_data.get('resource_requirements', {})
-                runtime = exec_data.get('estimated_execution_time', 0)
-                
-                print(f"  Startable Components: {', '.join(startable)}")
-                print(f"  Estimated Runtime: {runtime} seconds")
-                print(f"  Memory Requirements: {resources.get('memory_requirements_mb', 0)} MB")
-                print(f"  CPU Intensity: {resources.get('cpu_intensity', 'unknown')}")
-                        
-            except ImportError:
-                print("  Install msgpack to see execution details: pip install msgpack")
-            except Exception as e:
-                print(f"  Error reading execution metadata: {e}")
-            print()
+            _show_execution_metadata(zf)
+            click.echo()
         
         # Show subjob info
         if 'subjob_metadata.msgpack' in zf.namelist():
-            print("Subjob Info:")
-            try:
-                import msgpack
-                subjob_data = msgpack.unpackb(zf.read('subjob_metadata.msgpack'), raw=False)
-                components = subjob_data.get('components', {})
-                execution_order = subjob_data.get('execution_order', [])
-                
-                print(f"  Total Subjobs: {len(components)}")
-                print(f"  Execution Order: {' -> '.join(execution_order)}")
-                print("  Subjob Breakdown:")
-                for subjob_id in execution_order:
-                    comps = components.get(subjob_id, [])
-                    print(f"    - {subjob_id}: {len(comps)} components")
-                    for comp in comps[:3]:  # Show first 3 components
-                        print(f"      * {comp}")
-                    if len(comps) > 3:
-                        print(f"      * ... and {len(comps) - 3} more")
-                        
-            except ImportError:
-                print("  Install msgpack to see subjob details: pip install msgpack")
-            except Exception as e:
-                print(f"  Error reading subjobs: {e}")
-            print()
+            _show_subjob_info(zf)
+            click.echo()
         
         # Extract if requested
         if extract_to:
             extract_path = Path(extract_to)
             extract_path.mkdir(parents=True, exist_ok=True)
             zf.extractall(extract_path)
-            print(f"Extracted to: {extract_path}")
+            click.echo(f"Extracted to: {extract_path}")
 
 
-def read_msgpack_file(file_path, summary_only=False):
-    """Read and display a specific MessagePack file."""
+def _show_dag_summary(zf):
+    """Show basic DAG summary."""
+    click.echo("DAG Summary:")
+    try:
+        import msgpack
+        dag_data = msgpack.unpackb(zf.read('dag.msgpack'), raw=False)
+        nodes = dag_data.get('nodes', [])
+        links = dag_data.get('links', [])
+        click.echo(f"  Nodes (Components): {len(nodes)}")
+        click.echo(f"  Links (Connections): {len(links)}")
+        
+        # Show component types
+        if nodes:
+            click.echo("  Component Types:")
+            types = {}
+            for node in nodes:
+                comp_type = node.get('component_type', 'unknown')
+                types[comp_type] = types.get(comp_type, 0) + 1
+            for comp_type, count in sorted(types.items()):
+                click.echo(f"    - {comp_type}: {count}")
+        
+        # Show first few nodes
+        click.echo("  First 3 Components:")
+        for node in nodes[:3]:
+            node_id = node.get('id', 'unknown')
+            comp_type = node.get('component_type', 'unknown')
+            startable = "[START]" if node.get('startable') else ""
+            click.echo(f"    - {node_id} ({comp_type}) {startable}")
+        
+        if len(nodes) > 3:
+            click.echo("    Use --show-dag for complete details")
+                
+    except ImportError:
+        click.echo("  Install msgpack to see DAG details: pip install msgpack")
+    except Exception as e:
+        click.echo(f"  Error reading DAG: {e}")
+
+
+def _show_detailed_dag_info(zf):
+    """Show detailed DAG information."""
+    click.echo("DAG Details:")
+    try:
+        import msgpack
+        dag_data = msgpack.unpackb(zf.read('dag.msgpack'), raw=False)
+        nodes = dag_data.get('nodes', [])
+        links = dag_data.get('links', [])
+        
+        click.echo(f"  Total Nodes: {len(nodes)}")
+        click.echo(f"  Total Links: {len(links)}")
+        click.echo()
+        
+        # Show all nodes
+        click.echo("  All Components:")
+        for node in nodes:
+            node_id = node.get('id', 'unknown')
+            comp_type = node.get('component_type', 'unknown')
+            startable = "[START]" if node.get('startable') else ""
+            allow_multi = "[MULTI]" if node.get('allow_multi_in') else ""
+            idempotent = "[IDEM]" if node.get('idempotent') else ""
+            flags = f" {startable}{allow_multi}{idempotent}".strip()
+            click.echo(f"    - {node_id} ({comp_type}){flags}")
+        click.echo()
+        
+        # Show all links
+        click.echo("  All Connections:")
+        data_links = []
+        control_links = []
+        
+        for link in links:
+            source = link.get('source', 'unknown')
+            target = link.get('target', 'unknown')
+            link_type = link.get('edge_type', 'unknown')
+            
+            if link_type == 'data':
+                src_port = link.get('source_port', 'main')
+                tgt_port = link.get('target_port', 'main')
+                data_links.append(f"    {source}.{src_port} --> {target}.{tgt_port}")
+            elif link_type == 'control':
+                trigger = link.get('trigger', 'unknown')
+                control_links.append(f"    {source} --({trigger})--> {target}")
+        
+        if data_links:
+            click.echo("    Data Flow:")
+            for link in sorted(data_links):
+                click.echo(link)
+        
+        if control_links:
+            click.echo("    Control Flow:")
+            for link in sorted(control_links):
+                click.echo(link)
+                
+    except ImportError:
+        click.echo("  Install msgpack to see DAG details: pip install msgpack")
+    except Exception as e:
+        click.echo(f"  Error reading DAG: {e}")
+
+
+def _show_execution_metadata(zf):
+    """Show execution metadata."""
+    click.echo("Execution Metadata:")
+    try:
+        import msgpack
+        exec_data = msgpack.unpackb(zf.read('execution_metadata.msgpack'), raw=False)
+        
+        startable = exec_data.get('startable_components', [])
+        resources = exec_data.get('resource_requirements', {})
+        runtime = exec_data.get('estimated_execution_time', 0)
+        
+        click.echo(f"  Startable Components: {', '.join(startable)}")
+        click.echo(f"  Estimated Runtime: {runtime} seconds")
+        click.echo(f"  Memory Requirements: {resources.get('memory_requirements_mb', 0)} MB")
+        click.echo(f"  CPU Intensity: {resources.get('cpu_intensity', 'unknown')}")
+        click.echo(f"  IO Intensity: {resources.get('io_intensity', 'unknown')}")
+        
+        # Show parallel execution plan if available
+        parallel_plan = exec_data.get('parallel_execution_plan', {})
+        if parallel_plan:
+            max_parallel = parallel_plan.get('max_parallelism', 1)
+            exec_waves = parallel_plan.get('execution_waves', 1)
+            click.echo(f"  Max Parallelism: {max_parallel}")
+            click.echo(f"  Execution Waves: {exec_waves}")
+                
+    except ImportError:
+        click.echo("  Install msgpack to see execution details: pip install msgpack")
+    except Exception as e:
+        click.echo(f"  Error reading execution metadata: {e}")
+
+
+def _show_subjob_info(zf):
+    """Show subjob information."""
+    click.echo("Subjob Info:")
+    try:
+        import msgpack
+        subjob_data = msgpack.unpackb(zf.read('subjob_metadata.msgpack'), raw=False)
+        components = subjob_data.get('components', {})
+        execution_order = subjob_data.get('execution_order', [])
+        
+        click.echo(f"  Total Subjobs: {len(components)}")
+        click.echo(f"  Execution Order: {' -> '.join(execution_order)}")
+        click.echo("  Subjob Breakdown:")
+        
+        for subjob_id in execution_order:
+            comps = components.get(subjob_id, [])
+            click.echo(f"    - {subjob_id}: {len(comps)} components")
+            for comp in comps[:3]:  # Show first 3 components
+                click.echo(f"      * {comp}")
+            if len(comps) > 3:
+                click.echo(f"      * ... and {len(comps) - 3} more")
+                
+    except ImportError:
+        click.echo("  Install msgpack to see subjob details: pip install msgpack")
+    except Exception as e:
+        click.echo(f"  Error reading subjobs: {e}")
+
+
+def read_msgpack_file_cli(file_path, summary_only=False):
+    """CLI wrapper for reading MessagePack files directly."""
     try:
         import msgpack
         with open(file_path, 'rb') as f:
             data = msgpack.unpackb(f.read(), raw=False)
         
-        print(f"File: {file_path}")
-        print("=" * 50)
+        click.echo(f"File: {file_path}")
+        click.echo("=" * 50)
         
         if summary_only:
-            print_data_summary(data)
+            _print_data_summary(data)
         else:
-            print(json.dumps(data, indent=2, default=str))
+            click.echo(json.dumps(data, indent=2, default=str))
             
     except ImportError:
-        print("Error: msgpack package required. Install with: pip install msgpack")
+        click.echo("Error: msgpack package required. Install with: pip install msgpack")
+        raise click.Abort()
     except Exception as e:
-        print(f"Error reading {file_path}: {e}")
+        click.echo(f"Error reading {file_path}: {e}")
+        raise click.Abort()
 
 
-def print_data_summary(data):
+def _print_data_summary(data):
     """Print a summary of the data structure."""
     if isinstance(data, dict):
-        print("Dictionary with keys:")
+        click.echo("Dictionary with keys:")
         for key, value in data.items():
             if isinstance(value, list):
-                print(f"  {key}: List with {len(value)} items")
+                click.echo(f"  {key}: List with {len(value)} items")
             elif isinstance(value, dict):
-                print(f"  {key}: Dict with {len(value)} keys")
+                click.echo(f"  {key}: Dict with {len(value)} keys")
             else:
-                print(f"  {key}: {type(value).__name__} = {str(value)[:50]}...")
+                value_str = str(value)[:50]
+                if len(str(value)) > 50:
+                    value_str += "..."
+                click.echo(f"  {key}: {type(value).__name__} = {value_str}")
                 
         # Special handling for DAG structure
         if 'nodes' in data and 'links' in data:
-            print(f"\nGraph Structure:")
-            print(f"  Nodes: {len(data['nodes'])}")
-            print(f"  Links: {len(data['links'])}")
+            click.echo(f"\nGraph Structure:")
+            click.echo(f"  Nodes: {len(data['nodes'])}")
+            click.echo(f"  Links: {len(data['links'])}")
             
         # Special handling for subjob structure
         if 'components' in data:
-            print(f"\nSubjob Structure:")
+            click.echo(f"\nSubjob Structure:")
             for subjob_id, components in data['components'].items():
-                print(f"  {subjob_id}: {len(components)} components")
+                click.echo(f"  {subjob_id}: {len(components)} components")
                 
     elif isinstance(data, list):
-        print(f"List with {len(data)} items")
+        click.echo(f"List with {len(data)} items")
         if data:
-            print(f"  First item type: {type(data[0]).__name__}")
+            click.echo(f"  First item type: {type(data[0]).__name__}")
     else:
-        print(f"{type(data).__name__}: {str(data)[:100]}")
-
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  python inspect_pjob.py <pjob_file>                    # Inspect .pjob file")
-        print("  python inspect_pjob.py <pjob_file> extract <dir>      # Extract contents")
-        print("  python inspect_pjob.py <msgpack_file> msgpack         # Read .msgpack file")
-        print("  python inspect_pjob.py <msgpack_file> msgpack summary # Read .msgpack summary")
-        print("\nExamples:")
-        print("  python inspect_pjob.py jobs\\my_job.pjob")
-        print("  python inspect_pjob.py jobs\\my_job.pjob extract extracted")
-        print("  python inspect_pjob.py extracted\\dag.msgpack msgpack")
-        sys.exit(1)
-    
-    file_path = sys.argv[1]
-    
-    if not Path(file_path).exists():
-        print(f"Error: File not found: {file_path}")
-        sys.exit(1)
-    
-    # Handle different modes
-    if len(sys.argv) >= 3 and sys.argv[2] == 'msgpack':
-        # Read msgpack file directly
-        summary_only = len(sys.argv) > 3 and sys.argv[3] == 'summary'
-        read_msgpack_file(file_path, summary_only)
-    elif len(sys.argv) >= 4 and sys.argv[2] == 'extract':
-        # Extract pjob file
-        extract_dir = sys.argv[3]
-        inspect_pjob(file_path, extract_dir)
-    else:
-        # Inspect pjob file
-        inspect_pjob(file_path)
-
-
-if __name__ == "__main__":
-    main()
+        data_str = str(data)[:100]
+        if len(str(data)) > 100:
+            data_str += "..."
+        click.echo(f"{type(data).__name__}: {data_str}")
