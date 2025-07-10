@@ -91,7 +91,7 @@ class PortResolver:
             # Step 3: Validate all port connections
             errors.extend(self._validate_all_connections(dag))
             
-            # Step 4: Add optimization metadata
+            # Step 4: Add metadata
             self._add_metadata(dag, port_mapping)
             
         except PortResolutionError as e:
@@ -99,7 +99,7 @@ class PortResolver:
         
         return dag, errors
     
-    # === CORE LOGIC ===
+ 
     
     def _find_concrete_ports(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[str]]]:
         """edge scan to find concrete ports."""
