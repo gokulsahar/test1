@@ -1,6 +1,7 @@
 import click
 from pathlib import Path
 from pype.cli.build import build_command
+from pype.cli.setup import setup_command
 from pype.cli.registry import (
     register_component_command,
     list_components_command, 
@@ -21,6 +22,9 @@ def cli():
     """DataPY ETL Framework - CLI-first, YAML-driven ETL pipeline engine."""
     pass
 
+
+# Setup command
+cli.add_command(setup_command, name="setup")
 
 # Build commands
 cli.add_command(build_command, name="build")

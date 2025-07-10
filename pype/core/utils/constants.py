@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # Database configuration
-DB_PATH = str(Path(__file__).resolve().parents[2] / "sql_db" / "components.db")
+DB_PATH = str(Path(__file__).resolve().parents[2] / "sql_db" / "datapy_metadata.db")
 
 # Schema file names
 JOB_SCHEMA_FILE = "job.schema.json"
