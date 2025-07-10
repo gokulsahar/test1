@@ -7,6 +7,11 @@ from pype.cli.registry import (
     component_info_command,
     delete_component_command
 )
+from pype.cli.component_creator import (
+    create_component,
+    component_template,
+    component_examples
+)
 
 
 @click.group()
@@ -43,6 +48,10 @@ cli.add_command(component_info_command, name="component-info")
 cli.add_command(component_info_command, name="info")  # Shorter alias
 cli.add_command(delete_component_command, name="delete-component")
 
+# Component creation commands
+cli.add_command(create_component, name="create-component")
+cli.add_command(component_template, name="component-template")
+cli.add_command(component_examples, name="component-examples")
 
 # Placeholder commands for future phases
 @cli.command()
@@ -52,7 +61,6 @@ cli.add_command(delete_component_command, name="delete-component")
 def run(job_file, context, resume):
     """Run a .pjob file (Phase 2 - Not implemented yet)."""
     click.echo("Run command will be implemented in Phase 2")
-
 
 
 @cli.command()

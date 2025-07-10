@@ -1,6 +1,7 @@
 import sqlite3
 import pkgutil
 import importlib
+import re
 from typing import Dict, List, Optional, Any
 from .sqlite_backend import BaseSQLBackend
 
@@ -11,7 +12,7 @@ class ComponentRegistry(BaseSQLBackend):
     def _validate_component(self, component: Dict[str, Any]) -> bool:
         """Validate component data has required fields and correct types."""
         required_fields = [
-            'name', 'class_name', 'module_path', 'category', 'description',
+            'name', 'version', 'class_name', 'module_path', 'category', 'description',
             'input_ports', 'output_ports', 'required_params', 'optional_params',
             'output_globals', 'dependencies', 'startable', 'allow_multi_in',
             'idempotent'
@@ -24,7 +25,6 @@ class ComponentRegistry(BaseSQLBackend):
         # Type and format validation
         try:
             # String fields with pattern validation
-            import re
             name_pattern = r'^[a-zA-Z][a-zA-Z0-9_]*$'
             if not re.match(name_pattern, component['name']):
                 return False
@@ -35,6 +35,11 @@ class ComponentRegistry(BaseSQLBackend):
             if not isinstance(component['category'], str) or not component['category']:
                 return False
             if not isinstance(component['description'], str):
+                return False
+            
+            if not isinstance(component['version'], str):
+                return False
+            if not self._is_valid_semver(component['version']):
                 return False
             
             # List fields
@@ -57,6 +62,11 @@ class ComponentRegistry(BaseSQLBackend):
         except (TypeError, KeyError, AttributeError):
             return False
     
+    def _is_valid_semver(self, version: str) -> bool:
+        """Validate semantic versioning format (MAJOR.MINOR.PATCH)."""
+        semver_pattern = r'^(\d+)\.(\d+)\.(\d+)$'
+        return bool(re.match(semver_pattern, version))
+    
     def _prepare_component_data(self, component: Dict[str, Any]) -> tuple:
         """Prepare component data for database insertion with defaults."""
         defaults = {
@@ -70,13 +80,15 @@ class ComponentRegistry(BaseSQLBackend):
             'dependencies': [],
             'startable': 0,
             'allow_multi_in': 0,
-            'idempotent': 1
+            'idempotent': 1,
+            'version': '0.1.0'
         }
         
         data = {**defaults, **component}
         
         return (
             data['name'],
+            data['version'],
             data['class_name'],
             data['module_path'],
             data['category'],
@@ -103,11 +115,11 @@ class ComponentRegistry(BaseSQLBackend):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO components (
-                    name, class_name, module_path, category, description,
+                    name, version, class_name, module_path, category, description,
                     input_ports, output_ports, required_params, optional_params,
                     output_globals, dependencies, startable, allow_multi_in,
                     idempotent, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, data)
             conn.commit()
         
@@ -127,6 +139,7 @@ class ComponentRegistry(BaseSQLBackend):
             
             return {
                 'name': row['name'],
+                'version': row['version'],
                 'class_name': row['class_name'],
                 'module_path': row['module_path'],
                 'category': row['category'],
@@ -154,6 +167,7 @@ class ComponentRegistry(BaseSQLBackend):
             for row in cursor.fetchall():
                 components.append({
                     'name': row['name'],
+                    'version': row['version'],  # Added version field
                     'class_name': row['class_name'],
                     'module_path': row['module_path'],
                     'category': row['category'],
@@ -183,14 +197,37 @@ class ComponentRegistry(BaseSQLBackend):
             return cursor.rowcount > 0
     
     def _extract_component_metadata(self, cls, class_name: str, module_path: str) -> Dict[str, Any]:
-        """Extract component metadata from Python class."""
+        """Extract component metadata from Python class with validation."""
+        
+        # Validate required attributes exist and have correct types
+        required_attrs = {
+            'COMPONENT_NAME': str,
+            'VERSION': str,
+            'CATEGORY': str,
+        }
+        
+        for attr_name, expected_type in required_attrs.items():
+            if not hasattr(cls, attr_name):
+                raise AttributeError(f"Component {class_name} missing required attribute: {attr_name}")
+            
+            attr_value = getattr(cls, attr_name)
+            if not isinstance(attr_value, expected_type):
+                raise TypeError(f"Component {class_name}.{attr_name} must be {expected_type.__name__}, got {type(attr_value).__name__}")
+        
+        # Special validation for VERSION format (semantic versioning)
+        version = getattr(cls, 'VERSION')
+        if not self._is_valid_semver(version):
+            raise ValueError(f"Component {class_name}.VERSION must follow semantic versioning (e.g., '1.0.0'), got '{version}'")
+        
+        # Extract configuration schema
         config_schema = getattr(cls, 'CONFIG_SCHEMA', {"required": {}, "optional": {}})
         
         return {
-            'name': getattr(cls, 'COMPONENT_NAME', class_name.lower()),
+            'name': getattr(cls, 'COMPONENT_NAME'),
+            'version': version,
             'class_name': class_name,
             'module_path': module_path,
-            'category': getattr(cls, 'CATEGORY', 'unknown'),
+            'category': getattr(cls, 'CATEGORY'),
             'description': getattr(cls, '__doc__', '').strip() if getattr(cls, '__doc__') else '',
             'input_ports': getattr(cls, 'INPUT_PORTS', []),
             'output_ports': getattr(cls, 'OUTPUT_PORTS', []),

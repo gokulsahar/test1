@@ -20,10 +20,10 @@ class BaseSQLBackend:
     def _init_db(self):
         """Initialize database tables."""
         with sqlite3.connect(self.db_path) as conn:
-            # Components table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS components (
                     name TEXT PRIMARY KEY,
+                    version TEXT NOT NULL,
                     class_name TEXT NOT NULL,
                     module_path TEXT NOT NULL,
                     category TEXT NOT NULL DEFAULT 'unknown',
