@@ -99,10 +99,8 @@ class PortResolver:
         
         return dag, errors
     
- 
-    
     def _find_concrete_ports(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[str]]]:
-        """edge scan to find concrete ports."""
+        """Edge scan to find concrete ports."""
         inputs_by_node = defaultdict(set)
         outputs_by_node = defaultdict(set)
         
@@ -173,12 +171,13 @@ class PortResolver:
         
         return sorted(set(result))  # Remove duplicates and sort
     
-    # === VALIDATION===
+    # === VALIDATION ===
     
     def _validate_all_connections(self, dag: nx.DiGraph) -> List[str]:
         """Single-pass validation with cached WildcardMatchers per component."""
         errors = []
-        connection_counts: Dict[Tuple[str, str], int] = Counter()
+        input_connection_counts: Dict[Tuple[str, str], int] = Counter()
+        output_connection_counts: Dict[Tuple[str, str], int] = Counter()
         
         # Cache matchers per component to avoid rebuilding
         component_matchers: Dict[Tuple[str, str], WildcardMatcher] = {}
@@ -191,8 +190,9 @@ class PortResolver:
             source_port = edge_data.get('source_port')
             target_port = edge_data.get('target_port')
             
-            # Track connections using tuple keys
-            connection_counts[(target, target_port)] += 1
+            # Track input and output connections using tuple keys
+            input_connection_counts[(target, target_port)] += 1
+            output_connection_counts[(source, source_port)] += 1
             
             # Validate both ports 
             errors.extend(self._validate_port(
@@ -204,13 +204,18 @@ class PortResolver:
         
         # Validate multi-input constraints using cached matchers
         errors.extend(self._validate_multi_input(
-            dag, connection_counts, component_matchers
+            dag, input_connection_counts, component_matchers
+        ))
+        
+        # Validate multi-output constraints using cached matchers
+        errors.extend(self._validate_multi_output(
+            dag, output_connection_counts, component_matchers
         ))
         
         return errors
     
     def _validate_port(self, component: str, port: str, port_type: str, 
-                                 dag: nx.DiGraph, matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
+                      dag: nx.DiGraph, matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
         """Validate port using cached WildcardMatcher."""
         errors = []
         
@@ -247,8 +252,8 @@ class PortResolver:
         return errors
     
     def _validate_multi_input(self, dag: nx.DiGraph, 
-                                        connection_counts: Dict[Tuple[str, str], int],
-                                        matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
+                             connection_counts: Dict[Tuple[str, str], int],
+                             matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
         """Validate multi-input constraints using cached matchers."""
         errors = []
         
@@ -279,6 +284,38 @@ class PortResolver:
                     f"Component '{component}' has allow_multi_in=False but "
                     f"wildcard port '{port}' has {count} connections"
                 )
+        
+        return errors
+    
+    def _validate_multi_output(self, dag: nx.DiGraph, 
+                              connection_counts: Dict[Tuple[str, str], int],
+                              matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
+        """Validate multi-output constraints using cached matchers."""
+        errors = []
+        
+        for (component, port), count in connection_counts.items():
+            if count <= 1:
+                continue
+                
+            node_data = dag.nodes.get(component, {})
+            
+            # Get or create cached matcher for output ports
+            cache_key = (component, 'output')
+            if cache_key not in matcher_cache:
+                output_ports = node_data.get('output_ports', [])
+                matcher_cache[cache_key] = WildcardMatcher(output_ports)
+            
+            matcher = matcher_cache[cache_key]
+            uses_wildcard = matcher.uses_wildcard(port)
+            
+            if not uses_wildcard:
+                # Non-wildcard output ports cannot have multiple connections
+                errors.append(
+                    f"Non-wildcard output port '{component}.{port}' "
+                    f"cannot have multiple connections ({count} found)"
+                )
+            # Note: Unlike inputs, outputs don't need a special flag like allow_multi_out
+            # Wildcard output ports are assumed to support fan-out by design
         
         return errors
     

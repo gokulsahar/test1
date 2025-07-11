@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Any, Set, Optional
 from dataclasses import dataclass
 from collections import defaultdict, deque
 from pype.core.registry.component_registry import ComponentRegistry
-from pype.core.utils.constants import GLOBAL_VAR_PATTERN
+from pype.core.utils.constants import ( GLOBAL_VAR_PATTERN, GLOBAL_VAR_DELIMITER )
 
 
 @dataclass
@@ -81,10 +81,8 @@ class StructureValidator:
             if reachability_errors:
                 raise UnreachableComponentError(f"Unreachable components: {[e.component for e in reachability_errors]}")
             
-            startable_errors = self._validate_startable_components(dag)
-            if startable_errors:
-                errors.extend(startable_errors)
-                raise StructureValidationError(f"Startable component validation failed: {[e.message for e in startable_errors]}")
+            # Check for isolated components
+            self._validate_no_isolated_components(dag)
             
             # Mark iterator boundaries
             self._mark_iterator_boundaries(dag)
@@ -92,8 +90,6 @@ class StructureValidator:
             # Non-critical validations
             errors.extend(self._validate_global_references(dag))
             errors.extend(self._validate_iterator_components(dag))
-            errors.extend(self._validate_component_dependencies(dag))
-            errors.extend(self._validate_edge_connectivity(dag))
             
             # Performance warnings
             warnings.extend(self._validate_performance_characteristics(dag))
@@ -148,8 +144,14 @@ class StructureValidator:
         errors = []
         
         startable_components = self._find_startable_components(dag)
+        
+        # Check if we have any startable components
         if not startable_components:
-            return errors  # Will be caught by startable validation
+            errors.append(ValidationError(
+                code="NO_STARTABLE_COMPONENTS",
+                message="No components can start execution (must have startable=True and no incoming control edges)"
+            ))
+            return errors  # Can't analyze reachability without startable components
         
         # Find all reachable components
         reachable = set()
@@ -173,49 +175,32 @@ class StructureValidator:
     def _find_startable_components(self, dag: nx.DiGraph) -> List[str]:
         """Find components that can start execution independently."""
         startable_components = []
-        
+
         for node, node_data in dag.nodes(data=True):
-            # Must have startable=True in registry metadata
+            #  1. Check registry metadata for startable flag
             is_registry_startable = node_data.get('startable', False)
-            
-            # Must have no incoming control edges
-            has_incoming_control = any(
-                edge_data.get('edge_type') == 'control'
-                for _, _, edge_data in dag.in_edges(node, data=True)
-            )
-            
-            if is_registry_startable and not has_incoming_control:
+
+            #  2. Check if the node has no incoming edges at all
+            has_any_incoming_edges = dag.in_degree(node) > 0
+
+            #  3. Add to result only if it's marked startable and has no dependencies
+            if is_registry_startable and not has_any_incoming_edges:
                 startable_components.append(node)
-        
+
         return startable_components
-    
-    def _validate_startable_components(self, dag: nx.DiGraph) -> List[ValidationError]:
-        """Validate startable component configuration."""
-        errors = []
+
+    def _validate_no_isolated_components(self, dag: nx.DiGraph) -> None:
+        """Validate that no components are completely isolated."""
+        isolated_components = []
         
-        startable_components = self._find_startable_components(dag)
+        for node in dag.nodes():
+            if dag.in_degree(node) == 0 and dag.out_degree(node) == 0:
+                isolated_components.append(node)
         
-        if not startable_components:
-            errors.append(ValidationError(
-                code="NO_STARTABLE_COMPONENTS",
-                message="No components can start execution (must have startable=True and no incoming control edges)"
-            ))
-        
-        # Validate each startable component
-        for comp in startable_components:
-            node_data = dag.nodes[comp]
-            required_params = node_data.get('registry_metadata', {}).get('required_params', {})
-            config = node_data.get('config', {})
-            
-            for param_name in required_params:
-                if param_name not in config:
-                    errors.append(ValidationError(
-                        code="STARTABLE_MISSING_PARAM",
-                        message=f"Startable component '{comp}' missing required parameter: {param_name}",
-                        component=comp
-                    ))
-        
-        return errors
+        if isolated_components:
+            raise StructureValidationError(
+                f"Isolated components found (no incoming or outgoing connections): {isolated_components}"
+            )
     
     def _mark_iterator_boundaries(self, dag: nx.DiGraph) -> None:
         """Mark components with their iterator boundary using recursive algorithm."""
@@ -263,7 +248,11 @@ class StructureValidator:
         # 2) Check for conflicting boundary (validated elsewhere)
         existing = dag.nodes[current_comp].get('iterator_boundary', "")
         if existing and existing != boundary_name:
-            pass  # will be caught in validation
+            raise ValidationError(
+                code="CONFLICTING_ITERATOR_BOUNDARY",
+                message=f"Component '{current_comp}' assigned to multiple iterator boundaries: '{existing}' and '{boundary_name}'",
+                component=current_comp
+            )
 
         # 3) Nested iterator case
         if dag.nodes[current_comp].get('component_type') == 'iterator':
@@ -331,7 +320,7 @@ class StructureValidator:
                 if comp_name not in dag.nodes():
                     errors.append(ValidationError(
                         code="INVALID_GLOBAL_REFERENCE",
-                        message=f"Component '{node}' references non-existent component '{comp_name}' in global variable '{comp_name}__{global_var}'",
+                        message=f"Component '{node}' references non-existent component '{comp_name}' in global variable '{comp_name}{GLOBAL_VAR_DELIMITER}{global_var}'",
                         component=node
                     ))
                 else:
@@ -347,7 +336,7 @@ class StructureValidator:
                         ))
         
         return errors
-    
+    #similar to context substitution in loader/templater.py
     def _extract_global_references_recursive(self, obj: Any, refs: List[Tuple[str, str]] = None) -> List[Tuple[str, str]]:
         """Recursively extract global variable references from nested structures."""
         if refs is None:
@@ -399,73 +388,6 @@ class StructureValidator:
                     code="INVALID_ITERATOR_STRUCTURE",
                     message=f"Iterator component '{iterator_comp}' must have at least one data output",
                     component=iterator_comp
-                ))
-        
-        return errors
-    
-    def _validate_component_dependencies(self, dag: nx.DiGraph) -> List[ValidationError]:
-        """Validate component dependencies exist in DAG."""
-        errors = []
-        
-        for node, node_data in dag.nodes(data=True):
-            dependencies = node_data.get('dependencies', [])
-            
-            for dep in dependencies:
-                if dep not in dag.nodes():
-                    errors.append(ValidationError(
-                        code="MISSING_DEPENDENCY",
-                        message=f"Component '{node}' requires dependency '{dep}' which is not present in DAG",
-                        component=node
-                    ))
-        
-        return errors
-    
-    def _validate_edge_connectivity(self, dag: nx.DiGraph) -> List[ValidationError]:
-        """Validate that there are no duplicate edges and no mixed data+control
-        between the same pair of components."""
-        errors = []
-        
-        # 1) Build signatures to catch exact duplicates
-        edge_signatures = defaultdict(int)
-        for source, target, edge_data in dag.edges(data=True):
-            edge_type = edge_data.get('edge_type', 'unknown')
-            if edge_type == 'control':
-                trigger   = edge_data.get('trigger', 'unknown')
-                signature = (source, target, edge_type, trigger)
-            else:
-                src_port  = edge_data.get('source_port', 'unknown')
-                tgt_port  = edge_data.get('target_port', 'unknown')
-                signature = (source, target, edge_type, src_port, tgt_port)
-            edge_signatures[signature] += 1
-        
-        # 2) Report duplicates if the exact same edge appears more than once
-        for signature, count in edge_signatures.items():
-            if count > 1:
-                src, tgt, etype = signature[:3]
-                errors.append(ValidationError(
-                    code="DUPLICATE_EDGE",
-                    message=(
-                        f"Duplicate {etype} edge between '{src}' and '{tgt}' "
-                        f"({count} instances)"
-                    )
-                ))
-        
-        # 3) Gather types per component-pair
-        component_pairs = defaultdict(set)
-        for source, target, edge_data in dag.edges(data=True):
-            component_pairs[(source, target)].add(
-                edge_data.get('edge_type', 'unknown')
-            )
-        
-        # 4) Flag any pair that has BOTH data and control
-        for (src, tgt), types in component_pairs.items():
-            if 'data' in types and 'control' in types:
-                errors.append(ValidationError(
-                    code="MIXED_EDGE_TYPES",
-                    message=(
-                        f"Components '{src}' and '{tgt}' cannot be connected "
-                        "by both data and control edges."
-                    )
                 ))
         
         return errors

@@ -69,13 +69,18 @@ class GraphBuilder:
         return dag
     
     def _create_component_nodes(self, dag: nx.DiGraph, components: List[ComponentModel]) -> None:
-        """Create nodes with rich metadata for runtime performance."""
+        """Create nodes with rich metadata and validate required parameters."""
         for component in components:
             registry_metadata = self._validate_component_exists(component.type)
             
             # Check for duplicate component names
             if dag.has_node(component.name):
                 raise GraphBuildError(f"Duplicate component name: '{component.name}'")
+            
+            # Validate required parameters are populated
+            self._validate_required_parameters(component.name, component.type, 
+                                            registry_metadata.get('required_params', {}), 
+                                            component.params)
             
             # Filter out timestamp columns to reduce metadata size
             filtered_metadata = {k: v for k, v in registry_metadata.items() 
@@ -92,6 +97,33 @@ class GraphBuilder:
                 'output_ports': registry_metadata['output_ports'],
                 'dependencies': registry_metadata['dependencies']
             })
+
+    def _validate_required_parameters(self, component_name: str, component_type: str, 
+                                    required_params: Dict[str, Any], config: Dict[str, Any]) -> None:
+        """Validate that all required parameters are populated with values."""
+        for param_name in required_params:
+            if param_name not in config:
+                raise GraphBuildError(
+                    f"Component '{component_name}' (type: {component_type}) missing required parameter: {param_name}"
+                )
+            
+            param_value = config[param_name]
+            
+            if param_value is None:
+                raise GraphBuildError(
+                    f"Component '{component_name}' (type: {component_type}) required parameter '{param_name}' cannot be None"
+                )
+            
+            if isinstance(param_value, str) and param_value.strip() == "":
+                raise GraphBuildError(
+                    f"Component '{component_name}' (type: {component_type}) required parameter '{param_name}' cannot be empty string"
+                )
+            
+            # Optional: Check for empty collections if you want to be strict
+            if isinstance(param_value, (list, dict)) and len(param_value) == 0:
+                raise GraphBuildError(
+                    f"Component '{component_name}' (type: {component_type}) required parameter '{param_name}' cannot be empty {type(param_value).__name__}"
+                )
     
     def _validate_component_exists(self, component_type: str) -> Dict[str, Any]:
         """
