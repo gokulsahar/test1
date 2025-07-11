@@ -287,37 +287,7 @@ class PortResolver:
         
         return errors
     
-    def _validate_multi_output(self, dag: nx.DiGraph, 
-                              connection_counts: Dict[Tuple[str, str], int],
-                              matcher_cache: Dict[Tuple[str, str], WildcardMatcher]) -> List[str]:
-        """Validate multi-output constraints using cached matchers."""
-        errors = []
-        
-        for (component, port), count in connection_counts.items():
-            if count <= 1:
-                continue
-                
-            node_data = dag.nodes.get(component, {})
-            
-            # Get or create cached matcher for output ports
-            cache_key = (component, 'output')
-            if cache_key not in matcher_cache:
-                output_ports = node_data.get('output_ports', [])
-                matcher_cache[cache_key] = WildcardMatcher(output_ports)
-            
-            matcher = matcher_cache[cache_key]
-            uses_wildcard = matcher.uses_wildcard(port)
-            
-            if not uses_wildcard:
-                # Non-wildcard output ports cannot have multiple connections
-                errors.append(
-                    f"Non-wildcard output port '{component}.{port}' "
-                    f"cannot have multiple connections ({count} found)"
-                )
-            # Note: Unlike inputs, outputs don't need a special flag like allow_multi_out
-            # Wildcard output ports are assumed to support fan-out by design
-        
-        return errors
+ 
     
     # === UTILITIES ===
     
