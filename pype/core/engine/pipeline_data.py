@@ -121,7 +121,7 @@ class PipelineData:
             raise ValueError(f"Cannot convert {self._data_type.value} data to pandas DataFrame")
         
         return self._pandas_cache
-    
+
     def to_dask(self) -> dd.DataFrame:
         """
         Convert data to Dask DataFrame with lazy conversion.
@@ -168,6 +168,11 @@ class PipelineData:
             "notes": self.notes
         }
     
+    def clear_cache(self) -> None:
+        """Clear cached converted data to free memory."""
+        self._pandas_cache = None
+        self._dask_cache = None
+
     def clone_with_data(self, new_data: Any, **metadata_updates) -> 'PipelineData':
         """
         Create a new PipelineData instance with different data but same metadata.
@@ -179,12 +184,14 @@ class PipelineData:
         Returns:
             New PipelineData instance
         """
-        return PipelineData(
+        new_instance = PipelineData(
             data=new_data,
             schema=metadata_updates.get('schema', self.schema),
             source=metadata_updates.get('source', self.source),
             notes=metadata_updates.get('notes', self.notes)
         )
+        # Don't copy caches to new instance to avoid memory bloat
+        return new_instance
     
     def __repr__(self) -> str:
         """Return detailed string representation."""

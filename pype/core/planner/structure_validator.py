@@ -94,9 +94,12 @@ class StructureValidator:
             # Performance warnings
             warnings.extend(self._validate_performance_characteristics(dag))
             
-        except StructureValidationError:
-            # Re-raise critical errors
-            raise
+        except (CycleDetectedError, UnreachableComponentError) as e:
+            # Convert critical structural errors to ValidationError
+            errors.append(ValidationError(
+                code="CRITICAL_STRUCTURE_ERROR",
+                message=str(e)
+            ))
         except Exception as e:
             errors.append(ValidationError(
                 code="VALIDATION_FAILED",
@@ -238,21 +241,24 @@ class StructureValidator:
         current_comp: str,
         boundary_name: str,
         visited: Set[str]
-    ) -> None:
+    ) -> List[ValidationError]:
         """Traverse downstream from component, marking iterator boundary."""
+        errors = []
+        
         # 1) Avoid cycles
         if current_comp in visited:
-            return
+            return errors
         visited.add(current_comp)
 
-        # 2) Check for conflicting boundary (validated elsewhere)
+        # 2) Check for conflicting boundary
         existing = dag.nodes[current_comp].get('iterator_boundary', "")
         if existing and existing != boundary_name:
-            raise ValidationError(
+            errors.append(ValidationError(
                 code="CONFLICTING_ITERATOR_BOUNDARY",
                 message=f"Component '{current_comp}' assigned to multiple iterator boundaries: '{existing}' and '{boundary_name}'",
                 component=current_comp
-            )
+            ))
+            return errors  # Don't continue traversal with conflicting boundary
 
         # 3) Nested iterator case
         if dag.nodes[current_comp].get('component_type') == 'iterator':
@@ -264,27 +270,27 @@ class StructureValidator:
                 trig = rescue_data.get('trigger', "")
                 if rescue_data.get('edge_type') == 'control' and \
                 trig in ('ok', 'error', 'subjob_ok', 'subjob_error'):
-                    self._traverse_iterator_boundary(
+                    rescue_errors = self._traverse_iterator_boundary(
                         dag,
                         rescue_target,
                         boundary_name,
                         visited
                     )
+                    errors.extend(rescue_errors)
 
             # c) Now start the *inner* boundary for this iterator
-            self._mark_iterator_boundary_recursive(
+            inner_errors = self._mark_iterator_boundary_recursive(
                 dag,
                 current_comp,
                 current_comp
             )
-            return
+            errors.extend(inner_errors)
+            return errors
 
         # 4) Normal component: tag under current boundary
         dag.nodes[current_comp]['iterator_boundary'] = boundary_name
 
-        # 5) Recurse on outgoing edges, skipping only 
-        #    - ok/error on iterators
-        #    - subjob_ok/error on subjob-starts
+        # 5) Recurse on outgoing edges
         is_iterator     = dag.nodes[current_comp].get('component_type') == 'iterator'
         is_subjob_start = dag.nodes[current_comp].get('is_subjob_start', False)
 
@@ -301,12 +307,15 @@ class StructureValidator:
                 continue
 
             # otherwise keep going under the same boundary
-            self._traverse_iterator_boundary(
+            traverse_errors = self._traverse_iterator_boundary(
                 dag,
                 target,
                 boundary_name,
                 visited
             )
+            errors.extend(traverse_errors)
+        
+        return errors
     
     def _validate_global_references(self, dag: nx.DiGraph) -> List[ValidationError]:
         """Validate global variable references in component configurations."""
