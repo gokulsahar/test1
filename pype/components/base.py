@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Union
 import pandas as pd
 import dask.dataframe as dd
+from pype.core.utils.constants import GLOBAL_VAR_DELIMITER
 
 
 class BaseComponent(ABC):
@@ -34,7 +35,7 @@ class BaseComponent(ABC):
         Initialize component with name, configuration, and global store.
         
         Args:
-            name: Unique component instance name
+            name: Unique component instance name from YAML definition
             config: Component configuration parameters
             global_store: Thread-safe global store for job-wide variables
         """
@@ -73,8 +74,7 @@ class BaseComponent(ABC):
         Returns:
             Output DataFrames keyed by port name
         """
-        # Store execution mode for property access
-        self._current_execution_mode = context.get("execution_mode", "pandas")
+        self.execution_mode = context.get("execution_mode", "pandas")
         
         # Setup phase - called once per component instance
         if not self._setup_called:
@@ -112,6 +112,7 @@ class BaseComponent(ABC):
             
         Note:
             Use self.set_global() to update global variables thread-safely
+            Use self.execution_mode to check "pandas" or "dask" mode
             Context is read-only - all dynamic state goes through GlobalStore
         """
         pass
@@ -142,14 +143,14 @@ class BaseComponent(ABC):
         Get global variable value thread-safely from GlobalStore.
         
         Args:
-            full_key: Full global variable key (component__variable format)
+            full_key: Full global variable key (component_name{GLOBAL_VAR_DELIMITER}variable format)
             default: Default value if key not found
             
         Returns:
             Global variable value or default
             
         Example:
-            count = self.get_global("upstream_component__row_count", 0)
+            count = self.get_global("extract_customers__row_count", 0)
         """
         if not self._global_store:
             return default
@@ -169,7 +170,7 @@ class BaseComponent(ABC):
             ValueError: If value exceeds 64KB or not serializable
             
         Example:
-            self.set_global("row_count", 1500)  # Becomes "my_component__row_count"
+            self.set_global("row_count", 1500)  # Becomes "extract_customers__row_count"
         """
         # Validate against declared OUTPUT_GLOBALS
         if variable_name not in self.OUTPUT_GLOBALS:
@@ -181,12 +182,11 @@ class BaseComponent(ABC):
         if not self._global_store:
             return
             
-        # Engine handles component name prefix
-        full_key = f"{self.name}__{variable_name}"
+        full_key = f"{self.name}{GLOBAL_VAR_DELIMITER}{variable_name}"
         self._global_store.set(full_key, value, mode=mode)
     
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.name})"
     
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(name='{self.name}', mode={self.execution_mode})"
+        return f"{self.__class__.__name__}(name='{self.name}')"
