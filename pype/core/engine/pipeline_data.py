@@ -42,6 +42,7 @@ class PipelineData:
             
         Raises:
             ValueError: If data type is not supported or data is None
+            TypeError: If data type cannot be determined
         """
         if data is None:
             raise ValueError("Data cannot be None")
@@ -57,6 +58,7 @@ class PipelineData:
         self._pandas_cache: Optional[pd.DataFrame] = None
         self._dask_cache: Optional[dd.DataFrame] = None
         self._cached_row_count: Optional[int] = None
+        self._row_count_estimated: bool = False
         
         # Validate supported data type
         if self._data_type not in DataType:
@@ -72,6 +74,8 @@ class PipelineData:
         """
         Get the number of rows if applicable (thread-safe).
         
+        For Dask DataFrames, returns estimated count to avoid expensive computation.
+        
         Returns:
             Number of rows for DataFrames, None for scalar/collection data
         """
@@ -86,30 +90,78 @@ class PipelineData:
             try:
                 if self._data_type == DataType.PANDAS:
                     self._cached_row_count = len(self._data)
+                    self._row_count_estimated = False
                 elif self._data_type == DataType.DASK:
-                    # Dask length computation can be expensive, cache it
-                    self._cached_row_count = len(self._data)
+                    # Use npartitions estimate instead of expensive len() computation
+                    # This avoids triggering computation of entire dataset
+                    try:
+                        # Try to get partition info for estimate
+                        npartitions = getattr(self._data, 'npartitions', 1)
+                        # Rough estimate: assume even distribution across partitions
+                        if hasattr(self._data, 'map_partitions'):
+                            # This is much faster than len() but still an estimate
+                            sample_partition = self._data.get_partition(0)
+                            if hasattr(sample_partition, 'compute'):
+                                sample_size = len(sample_partition.compute())
+                                self._cached_row_count = sample_size * npartitions
+                                self._row_count_estimated = True
+                            else:
+                                self._cached_row_count = None
+                        else:
+                            self._cached_row_count = None
+                    except Exception:
+                        # If estimation fails, don't compute - return None
+                        self._cached_row_count = None
                     
                 return self._cached_row_count
             except Exception:
-                # Some Dask operations don't support len()
+                # Some operations don't support length computation
                 return None
     
+    @property
+    def is_row_count_estimated(self) -> bool:
+        """
+        Check if row count is estimated (for Dask) or exact (for pandas).
+        
+        Returns:
+            True if row count is estimated, False if exact
+        """
+        return self._row_count_estimated
+    
     def _detect_data_type(self, data: Any) -> DataType:
-        """Automatically detect the data type from the input."""
+        """
+        Automatically detect the data type from the input.
+        
+        Raises:
+            TypeError: If data type cannot be determined or is unsupported
+        """
         if isinstance(data, pd.DataFrame):
             return DataType.PANDAS
         elif isinstance(data, dd.DataFrame):
             return DataType.DASK
         elif isinstance(data, (list, dict, tuple)):
             return DataType.COLLECTION
-        else:
+        elif isinstance(data, (str, int, float, bool)) or data is None:
             return DataType.SCALAR
+        else:
+            # Don't silently default - raise error for unknown types
+            raise TypeError(f"Unsupported data type: {type(data)}. "
+                          f"Supported types: pandas.DataFrame, dask.DataFrame, "
+                          f"list, dict, tuple, str, int, float, bool")
     
     def _extract_schema(self, data: Any) -> Dict[str, str]:
-        """Extract column schema from DataFrame data."""
-        if isinstance(data, (pd.DataFrame, dd.DataFrame)):
-            return {col: str(dtype) for col, dtype in data.dtypes.items()}
+        """
+        Extract column schema from DataFrame data safely.
+        
+        Returns:
+            Dictionary mapping column names to string representations of dtypes
+        """
+        try:
+            if isinstance(data, (pd.DataFrame, dd.DataFrame)):
+                return {col: str(dtype) for col, dtype in data.dtypes.items()}
+        except Exception:
+            # If schema extraction fails, return empty dict rather than crash
+            pass
         return {}
     
     def to_pandas(self) -> pd.DataFrame:
@@ -117,25 +169,26 @@ class PipelineData:
         Convert data to pandas DataFrame with thread-safe lazy conversion.
         
         Returns:
-            pandas DataFrame
+            pandas DataFrame (copy to prevent mutations)
             
         Raises:
             ValueError: If data cannot be converted to DataFrame
         """
         with self._lock:
             if self._pandas_cache is not None:
-                return self._pandas_cache
+                # Return copy to prevent mutations affecting cached data
+                return self._pandas_cache.copy()
             
             if self._data_type == DataType.PANDAS:
-                # For pandas data, cache reference to avoid duplication
-                self._pandas_cache = self._data
+                # Store copy in cache to prevent mutations to original
+                self._pandas_cache = self._data.copy()
             elif self._data_type == DataType.DASK:
                 # Convert Dask to pandas and cache result
                 self._pandas_cache = self._data.compute()
             else:
                 raise ValueError(f"Cannot convert {self._data_type.value} data to pandas DataFrame")
             
-            return self._pandas_cache
+            return self._pandas_cache.copy()
     
     def to_dask(self) -> dd.DataFrame:
         """
@@ -152,7 +205,7 @@ class PipelineData:
                 return self._dask_cache
             
             if self._data_type == DataType.DASK:
-                # For Dask data, cache reference to avoid duplication
+                # For Dask data, cache reference (Dask DataFrames are immutable)
                 self._dask_cache = self._data
             elif self._data_type == DataType.PANDAS:
                 # Convert pandas to Dask and cache result
@@ -166,9 +219,13 @@ class PipelineData:
         """
         Get the raw underlying data without conversion.
         
+        For pandas DataFrames, returns a copy to prevent mutations.
+        
         Returns:
-            The original data object
+            The original data object (copy for pandas DataFrames)
         """
+        if self._data_type == DataType.PANDAS:
+            return self._data.copy()
         return self._data
     
     def get_metadata(self) -> Dict[str, Any]:
@@ -182,6 +239,7 @@ class PipelineData:
             "data_type": self._data_type.value,
             "schema": self.schema,
             "row_count": self.row_count,
+            "row_count_estimated": self.is_row_count_estimated,
             "source": self.source,
             "notes": self.notes
         }
@@ -197,21 +255,29 @@ class PipelineData:
             self._pandas_cache = None
             self._dask_cache = None
             self._cached_row_count = None
+            self._row_count_estimated = False
     
     def clone_with_data(self, new_data: Any, **metadata_updates) -> 'PipelineData':
         """
         Create a new PipelineData instance with different data but same metadata.
+        
+        Schema is auto-detected from new data unless explicitly provided.
         
         Args:
             new_data: New data to wrap
             **metadata_updates: Optional metadata field updates
             
         Returns:
-            New PipelineData instance
+            New PipelineData instance with auto-detected schema for new data
         """
+        # Auto-detect schema for new data unless explicitly provided
+        new_schema = metadata_updates.get('schema')
+        if new_schema is None:
+            new_schema = self._extract_schema(new_data)
+        
         return PipelineData(
             data=new_data,
-            schema=metadata_updates.get('schema', self.schema),
+            schema=new_schema,
             source=metadata_updates.get('source', self.source),
             notes=metadata_updates.get('notes', self.notes)
         )
@@ -219,7 +285,14 @@ class PipelineData:
     def __repr__(self) -> str:
         """Return detailed string representation."""
         schema_summary = f"{len(self.schema)} columns" if self.schema else "no schema"
-        row_info = f", {self.row_count} rows" if self.row_count is not None else ""
+        
+        row_count = self.row_count
+        if row_count is not None:
+            estimate_marker = "~" if self.is_row_count_estimated else ""
+            row_info = f", {estimate_marker}{row_count} rows"
+        else:
+            row_info = ""
+            
         source_info = f" from {self.source}" if self.source else ""
         
         return (f"PipelineData(type={self._data_type.value}, "
@@ -228,6 +301,11 @@ class PipelineData:
     def __str__(self) -> str:
         """Return concise string representation."""
         if self._data_type in (DataType.PANDAS, DataType.DASK):
-            return f"{self._data_type.value.title()} DataFrame: {self.row_count} rows, {len(self.schema)} columns"
+            row_count = self.row_count
+            if row_count is not None:
+                estimate_marker = "~" if self.is_row_count_estimated else ""
+                return f"{self._data_type.value.title()} DataFrame: {estimate_marker}{row_count} rows, {len(self.schema)} columns"
+            else:
+                return f"{self._data_type.value.title()} DataFrame: unknown rows, {len(self.schema)} columns"
         else:
             return f"{self._data_type.value.title()} data: {type(self._data).__name__}"
