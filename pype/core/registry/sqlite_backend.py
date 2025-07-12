@@ -23,7 +23,7 @@ class BaseSQLBackend:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS components (
                     name TEXT PRIMARY KEY,
-                    version TEXT NOT NULL DEFAULT '0.1.0',
+                    version TEXT NOT NULL DEFAULT '1.0.0',
                     class_name TEXT NOT NULL,
                     module_path TEXT NOT NULL,
                     category TEXT NOT NULL DEFAULT 'unknown',

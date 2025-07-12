@@ -81,7 +81,7 @@ class ComponentRegistry(BaseSQLBackend):
             'startable': 0,
             'allow_multi_in': 0,
             'idempotent': 1,
-            'version': '0.1.0'
+            'version': '1.0.0'
         }
         
         data = {**defaults, **component}
@@ -213,7 +213,7 @@ class ComponentRegistry(BaseSQLBackend):
             if not isinstance(attr_value, expected_type):
                 raise TypeError(f"Component {class_name}.{attr_name} must be {expected_type.__name__}, got {type(attr_value).__name__}")
         
-        version = getattr(cls, 'VERSION', '0.1.0')
+        version = getattr(cls, 'VERSION', '1.0.0')
         if not self._is_valid_semver(version):
             raise ValueError(f"Component {class_name}.VERSION must follow semantic versioning (e.g., '1.0.0'), got '{version}'")
         
