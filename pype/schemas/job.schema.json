@@ -66,6 +66,55 @@
           "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
           "default": "200MB",
           "description": "Data chunk size for dask mode processing"
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "threadpool": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "max_workers": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 128,
+                  "default": 8,
+                  "description": "Maximum threadpool workers for pandas components"
+                }
+              }
+            },
+            "dask": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Enable dask cluster for the job"
+                },
+                "cluster_workers": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1024,
+                  "description": "Total number of workers in the dask cluster"
+                },
+                "threads_per_worker": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 32,
+                  "default": 2,
+                  "description": "Threads per dask worker"
+                },
+                "memory_per_worker": {
+                  "type": "string",
+                  "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
+                  "default": "4GB",
+                  "description": "Default memory allocation per dask worker"
+                }
+              }
+            }
+          }
         }
       }
     },
