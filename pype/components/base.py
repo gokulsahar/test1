@@ -20,6 +20,7 @@ class BaseComponent(ABC):
     STARTABLE: bool = False
     ALLOW_MULTI_IN: bool = False
     IDEMPOTENT: bool = True
+    VERSION: str = "1.0.0"
     
     CONFIG_SCHEMA: Dict[str, Any] = {
         "required": {},  # param_name: {"type": "str", "description": "..."}

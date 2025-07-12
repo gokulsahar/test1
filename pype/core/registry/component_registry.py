@@ -167,7 +167,7 @@ class ComponentRegistry(BaseSQLBackend):
             for row in cursor.fetchall():
                 components.append({
                     'name': row['name'],
-                    'version': row['version'],  # Added version field
+                    'version': row['version'],
                     'class_name': row['class_name'],
                     'module_path': row['module_path'],
                     'category': row['category'],
@@ -202,7 +202,6 @@ class ComponentRegistry(BaseSQLBackend):
         # Validate required attributes exist and have correct types
         required_attrs = {
             'COMPONENT_NAME': str,
-            'VERSION': str,
             'CATEGORY': str,
         }
         
@@ -214,8 +213,7 @@ class ComponentRegistry(BaseSQLBackend):
             if not isinstance(attr_value, expected_type):
                 raise TypeError(f"Component {class_name}.{attr_name} must be {expected_type.__name__}, got {type(attr_value).__name__}")
         
-        # Special validation for VERSION format (semantic versioning)
-        version = getattr(cls, 'VERSION')
+        version = getattr(cls, 'VERSION', '0.1.0')
         if not self._is_valid_semver(version):
             raise ValueError(f"Component {class_name}.VERSION must follow semantic versioning (e.g., '1.0.0'), got '{version}'")
         
