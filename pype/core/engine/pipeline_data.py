@@ -1,3 +1,4 @@
+import threading
 from enum import Enum
 from typing import Any, Dict, Optional, Union
 import pandas as pd
@@ -14,10 +15,11 @@ class DataType(Enum):
 
 class PipelineData:
     """
-    Unified data abstraction for passing data between pipeline components.
+    Thread-safe unified data abstraction for passing data between pipeline components.
     
     Supports pandas DataFrames, Dask DataFrames, scalar values, and collections
-    with lazy conversion between formats and metadata tracking.
+    with lazy conversion between formats and metadata tracking. Thread-safe for
+    concurrent access in Dask and ThreadPool executors.
     """
     
     def __init__(
@@ -39,17 +41,22 @@ class PipelineData:
             notes: Optional transformation metadata
             
         Raises:
-            ValueError: If data type is not supported
+            ValueError: If data type is not supported or data is None
         """
+        if data is None:
+            raise ValueError("Data cannot be None")
+            
         self._data = data
         self._data_type = data_type or self._detect_data_type(data)
         self.schema = schema or self._extract_schema(data)
         self.source = source
         self.notes = notes
         
-        # Cache for converted data to enable lazy conversion
+        # Thread-safe caching with single lock per instance
+        self._lock = threading.RLock()  # Allow recursive locking
         self._pandas_cache: Optional[pd.DataFrame] = None
         self._dask_cache: Optional[dd.DataFrame] = None
+        self._cached_row_count: Optional[int] = None
         
         # Validate supported data type
         if self._data_type not in DataType:
@@ -63,25 +70,30 @@ class PipelineData:
     @property
     def row_count(self) -> Optional[int]:
         """
-        Get the number of rows if applicable.
+        Get the number of rows if applicable (thread-safe).
         
         Returns:
             Number of rows for DataFrames, None for scalar/collection data
         """
-        if self._data_type == DataType.PANDAS:
-            return len(self._data)
-        elif self._data_type == DataType.DASK:
-            # Dask length computation can be expensive, cache it
-            if hasattr(self, '_cached_row_count'):
+        if self._data_type not in (DataType.PANDAS, DataType.DASK):
+            return None
+            
+        with self._lock:
+            # Return cached count if available
+            if self._cached_row_count is not None:
                 return self._cached_row_count
+                
             try:
-                self._cached_row_count = len(self._data)
+                if self._data_type == DataType.PANDAS:
+                    self._cached_row_count = len(self._data)
+                elif self._data_type == DataType.DASK:
+                    # Dask length computation can be expensive, cache it
+                    self._cached_row_count = len(self._data)
+                    
                 return self._cached_row_count
             except Exception:
                 # Some Dask operations don't support len()
                 return None
-        else:
-            return None
     
     def _detect_data_type(self, data: Any) -> DataType:
         """Automatically detect the data type from the input."""
@@ -102,7 +114,7 @@ class PipelineData:
     
     def to_pandas(self) -> pd.DataFrame:
         """
-        Convert data to pandas DataFrame with lazy conversion.
+        Convert data to pandas DataFrame with thread-safe lazy conversion.
         
         Returns:
             pandas DataFrame
@@ -110,21 +122,24 @@ class PipelineData:
         Raises:
             ValueError: If data cannot be converted to DataFrame
         """
-        if self._pandas_cache is not None:
+        with self._lock:
+            if self._pandas_cache is not None:
+                return self._pandas_cache
+            
+            if self._data_type == DataType.PANDAS:
+                # For pandas data, cache reference to avoid duplication
+                self._pandas_cache = self._data
+            elif self._data_type == DataType.DASK:
+                # Convert Dask to pandas and cache result
+                self._pandas_cache = self._data.compute()
+            else:
+                raise ValueError(f"Cannot convert {self._data_type.value} data to pandas DataFrame")
+            
             return self._pandas_cache
-        
-        if self._data_type == DataType.PANDAS:
-            self._pandas_cache = self._data
-        elif self._data_type == DataType.DASK:
-            self._pandas_cache = self._data.compute()
-        else:
-            raise ValueError(f"Cannot convert {self._data_type.value} data to pandas DataFrame")
-        
-        return self._pandas_cache
-
+    
     def to_dask(self) -> dd.DataFrame:
         """
-        Convert data to Dask DataFrame with lazy conversion.
+        Convert data to Dask DataFrame with thread-safe lazy conversion.
         
         Returns:
             Dask DataFrame
@@ -132,17 +147,20 @@ class PipelineData:
         Raises:
             ValueError: If data cannot be converted to DataFrame
         """
-        if self._dask_cache is not None:
+        with self._lock:
+            if self._dask_cache is not None:
+                return self._dask_cache
+            
+            if self._data_type == DataType.DASK:
+                # For Dask data, cache reference to avoid duplication
+                self._dask_cache = self._data
+            elif self._data_type == DataType.PANDAS:
+                # Convert pandas to Dask and cache result
+                self._dask_cache = dd.from_pandas(self._data, npartitions=1)
+            else:
+                raise ValueError(f"Cannot convert {self._data_type.value} data to Dask DataFrame")
+            
             return self._dask_cache
-        
-        if self._data_type == DataType.DASK:
-            self._dask_cache = self._data
-        elif self._data_type == DataType.PANDAS:
-            self._dask_cache = dd.from_pandas(self._data, npartitions=1)
-        else:
-            raise ValueError(f"Cannot convert {self._data_type.value} data to Dask DataFrame")
-        
-        return self._dask_cache
     
     def get_raw_data(self) -> Any:
         """
@@ -168,11 +186,18 @@ class PipelineData:
             "notes": self.notes
         }
     
-    def clear_cache(self) -> None:
-        """Clear cached converted data to free memory."""
-        self._pandas_cache = None
-        self._dask_cache = None
-
+    def clear_caches(self) -> None:
+        """
+        Clear conversion caches to free memory.
+        
+        Useful for memory management in long-running ETL jobs.
+        Original data is preserved.
+        """
+        with self._lock:
+            self._pandas_cache = None
+            self._dask_cache = None
+            self._cached_row_count = None
+    
     def clone_with_data(self, new_data: Any, **metadata_updates) -> 'PipelineData':
         """
         Create a new PipelineData instance with different data but same metadata.
@@ -184,14 +209,12 @@ class PipelineData:
         Returns:
             New PipelineData instance
         """
-        new_instance = PipelineData(
+        return PipelineData(
             data=new_data,
             schema=metadata_updates.get('schema', self.schema),
             source=metadata_updates.get('source', self.source),
             notes=metadata_updates.get('notes', self.notes)
         )
-        # Don't copy caches to new instance to avoid memory bloat
-        return new_instance
     
     def __repr__(self) -> str:
         """Return detailed string representation."""
