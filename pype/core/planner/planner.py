@@ -605,13 +605,22 @@ class JobPlanner:
         Returns:
             Job configuration metadata for runtime use
         """
+        # Convert Pydantic ExecutionConfigModel to simple dict immediately
+        execution_config = getattr(job_model.job_config, 'execution', None)
+        execution_dict = None
+        if execution_config is not None:
+            if hasattr(execution_config, 'model_dump'):
+                execution_dict = execution_config.model_dump()
+            elif hasattr(execution_config, 'dict'):
+                execution_dict = execution_config.dict()
+        
         return {
             'retries': job_model.job_config.retries,
             'timeout': job_model.job_config.timeout,
             'fail_strategy': job_model.job_config.fail_strategy,
-            'execution_config': getattr(job_model.job_config, 'execution', None)
+            'execution_config': execution_dict  
         }
-    
+        
     def _get_component_subjob(self, component: str, subjob_components: Dict[str, List[str]]) -> str:
         """
         Get subjob ID for a component.
@@ -1050,11 +1059,6 @@ class JobPlanner:
         .pjob artifact. It converts the NetworkX graph to a format that
         can be safely serialized with msgpack and reconstructed at runtime.
         
-        Key Operations:
-        - Convert to node-link format (msgpack-friendly)
-        - Ensure all data is serializable (no complex objects)
-        - Handle special data types (sets, tuples, Pydantic models)
-        
         Args:
             dag: NetworkX DiGraph with full metadata
             
@@ -1064,32 +1068,8 @@ class JobPlanner:
         # Fix NetworkX 3.6 future warning by explicitly setting edges parameter
         dag_data = nx.node_link_data(dag, edges="links")
         
-        # Ensure all data is serializable (no complex objects)
-        def make_serializable(obj):
-            if isinstance(obj, set):
-                return list(obj)
-            elif isinstance(obj, (list, tuple)):
-                return [make_serializable(item) for item in obj]
-            elif isinstance(obj, dict):
-                return {k: make_serializable(v) for k, v in obj.items()}
-            elif hasattr(obj, 'model_dump'):  # Pydantic v2 model
-                return make_serializable(obj.model_dump())
-            elif hasattr(obj, 'dict'):  # Pydantic v1 model
-                return make_serializable(obj.dict())
-            elif hasattr(obj, '__dict__'):  # Generic object with attributes
-                return make_serializable(vars(obj))
-            else:
-                # Try to convert to basic types
-                try:
-                    # Test if it's already JSON serializable (which msgpack can handle)
-                    import json
-                    json.dumps(obj)
-                    return obj
-                except (TypeError, ValueError):
-                    # Convert to string as fallback
-                    return str(obj)
-        
-        return make_serializable(dag_data)
+        # Simple serialization - no complex logic needed since we store simple data
+        return dag_data
 
 
 class PlanResultValidationError(PlanningError):
