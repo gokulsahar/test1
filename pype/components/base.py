@@ -1,13 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
-from pype.core.engine.pipeline_data import PipelineData
+from typing import Any, Dict, List, Union
+import pandas as pd
+import dask.dataframe as dd
 
 
 class BaseComponent(ABC):
     """
-    Base class for all DataPY components following two-level execution architecture.    
-    Components choose their executor and handle their own configuration.
-    All components must override execute().
+    Base class for all DataPY components with simplified execution architecture.
+    
+    Components automatically adapt to job-level execution mode (pandas/dask) and
+    receive raw DataFrames directly. Global variables managed through injected GlobalStore.
     """
     
     # Component metadata - override in subclasses
@@ -27,130 +29,164 @@ class BaseComponent(ABC):
         "optional": {}   # param_name: {"type": "str", "default": value, "description": "..."}
     }
     
-    def __init__(self, name: str, config: Optional[Dict[str, Any]] = None):
-        """Initialize component with name and configuration."""
+    def __init__(self, name: str, config: Dict[str, Any], global_store):
+        """
+        Initialize component with name, configuration, and global store.
+        
+        Args:
+            name: Unique component instance name
+            config: Component configuration parameters
+            global_store: Thread-safe global store for job-wide variables
+        """
         self.name = name
-        self.config = config or {}
+        self.config = config
+        self._global_store = global_store
         self._setup_called = False
         self._cleanup_called = False
     
-    # === EXECUTOR CONFIGURATION ACCESS ===
+    @property
+    def execution_mode(self) -> str:
+        """
+        Get the job-level execution mode from current execution context.
+        
+        Returns:
+            "pandas" or "dask" based on job configuration
+        """
+        # Will be set by run() method from context
+        return getattr(self, '_current_execution_mode', 'pandas')
     
-    def get_executor_type(self) -> str:
-        """Get configured executor type for this component."""
-        return self.config.get("executor", "threadpool")
+    def run(
+        self, 
+        context: Dict[str, Any], 
+        inputs: Dict[str, Union[pd.DataFrame, dd.DataFrame]]
+    ) -> Dict[str, Union[pd.DataFrame, dd.DataFrame]]:
+        """
+        Engine-facing execution wrapper that handles complete component lifecycle.
+        
+        The engine always calls this method, never execute() directly.
+        Handles setup, execution, and cleanup automatically.
+        
+        Args:
+            context: Read-only execution context with metadata
+            inputs: Input DataFrames keyed by port name
+            
+        Returns:
+            Output DataFrames keyed by port name
+        """
+        # Store execution mode for property access
+        self._current_execution_mode = context.get("execution_mode", "pandas")
+        
+        # Setup phase - called once per component instance
+        if not self._setup_called:
+            self.setup(context)
+            self._setup_called = True
+        
+        try:
+            # Execute phase - component business logic
+            result = self.execute(context, inputs)
+            return result
+            
+        finally:
+            # Cleanup phase - always called, even on errors
+            if not self._cleanup_called:
+                self.cleanup(context)
+                self._cleanup_called = True
     
-    def get_dask_config(self) -> Dict[str, Any]:
-        """Get Dask-specific configuration for this component."""
-        return self.config.get("dask_config", {})
-    
-    def get_disk_config(self) -> Dict[str, Any]:
-        """Get disk-based executor configuration for this component."""
-        return self.config.get("disk_config", {})
-    
-    def has_executor_config(self, executor_type: str) -> bool:
-        """Check if component has specific executor configuration."""
-        config_key = f"{executor_type}_config"
-        return config_key in self.config
-    
-    # === LIFECYCLE HOOKS (Optional - Override if needed) ===
+    @abstractmethod
+    def execute(
+        self, 
+        context: Dict[str, Any], 
+        inputs: Dict[str, Union[pd.DataFrame, dd.DataFrame]]
+    ) -> Dict[str, Union[pd.DataFrame, dd.DataFrame]]:
+        """
+        Execute the component logic with direct DataFrame handling.
+        
+        Args:
+            context: Read-only execution context with metadata
+            inputs: Input DataFrames keyed by port name
+                   Values are pandas or dask DataFrames based on job execution_mode
+            
+        Returns:
+            Output DataFrames keyed by port name
+            Must return pandas or dask DataFrames matching job execution_mode
+            
+        Note:
+            Use self.set_global() to update global variables thread-safely
+            Context is read-only - all dynamic state goes through GlobalStore
+        """
+        pass
     
     def setup(self, context: Dict[str, Any]) -> None:
         """
         Optional lifecycle hook called once before first execution.
+        Override only if component needs initialization (connections, files, etc.)
         
         Args:
-            context: Execution context with run metadata and globals
+            context: Read-only execution context with metadata
         """
         pass
     
     def cleanup(self, context: Dict[str, Any]) -> None:
         """
         Optional lifecycle hook called after component execution completes.
+        Override only if component needs cleanup (close connections, temp files, etc.)
+        Called even if execute() raises an exception.
         
         Args:
-            context: Execution context with run metadata and globals
+            context: Read-only execution context with metadata
         """
         pass
     
-    # === CORE EXECUTION (Must Override) ===
-    
-    @abstractmethod
-    def execute(self, context: Dict[str, Any], inputs: Dict[str, PipelineData]) -> Dict[str, PipelineData]:
+    def get_global(self, full_key: str, default=None):
         """
-        Execute the component logic with PipelineData contract.
+        Get global variable value thread-safely from GlobalStore.
         
         Args:
-            context: Execution context with global variables and metadata
-            inputs: Input PipelineData from connected upstream components
-                   Keys are port names, values are PipelineData instances
+            full_key: Full global variable key (component__variable format)
+            default: Default value if key not found
             
         Returns:
-            Dict with PipelineData outputs for downstream components
-            Keys are port names, values are PipelineData instances
+            Global variable value or default
+            
+        Example:
+            count = self.get_global("upstream_component__row_count", 0)
         """
-        pass
+        if not self._global_store:
+            return default
+        return self._global_store.get(full_key, default)
     
-    # === ENGINE INTEGRATION METHODS (Do not override) ===
-    
-    def _execute_with_lifecycle(self, context: Dict[str, Any], inputs: Dict[str, PipelineData]) -> Dict[str, PipelineData]:
+    def set_global(self, variable_name: str, value, mode: str = "replace"):
         """
-        Engine-facing execution wrapper that handles lifecycle hooks.
-        
-        This method is called by the ExecutionManager, not by component developers.
-        """
-        # Call setup hook if not already called
-        if not self._setup_called:
-            self.setup(context)
-            self._setup_called = True
-        
-        # Execute component logic
-        outputs = self.execute(context, inputs)
-        
-        return outputs
-    
-    def _cleanup_component(self, context: Dict[str, Any]) -> None:
-        """
-        Engine-facing cleanup wrapper.
-        
-        This method is called by the ExecutionManager during component lifecycle cleanup.
-        """
-        if not self._cleanup_called:
-            self.cleanup(context)
-            self._cleanup_called = True
-    
-    # === HELPER METHODS ===
-    
-    def _wrap_raw_data(self, data: Any, source: Optional[str] = None) -> PipelineData:
-        """
-        Helper method to wrap raw data in PipelineData.
+        Set global variable value thread-safely in GlobalStore.
         
         Args:
-            data: Raw data to wrap
-            source: Optional source identifier
+            variable_name: Variable name without component prefix (must be in OUTPUT_GLOBALS)
+            value: Value to set (must be JSON serializable and <64KB)
+            mode: Update mode - "replace" or "accumulate"
             
-        Returns:
-            PipelineData instance
+        Raises:
+            ValueError: If variable_name not declared in OUTPUT_GLOBALS
+            ValueError: If value exceeds 64KB or not serializable
+            
+        Example:
+            self.set_global("row_count", 1500)  # Becomes "my_component__row_count"
         """
-        return PipelineData(
-            data=data,
-            source=source or f"{self.name}_{self.COMPONENT_NAME}"
-        )
-    
-    def _extract_raw_data(self, pipeline_data: PipelineData) -> Any:
-        """
-        Helper method to extract raw data from PipelineData.
+        # Validate against declared OUTPUT_GLOBALS
+        if variable_name not in self.OUTPUT_GLOBALS:
+            raise ValueError(
+                f"Component '{self.name}' attempted to set undeclared global variable '{variable_name}'. "
+                f"Add '{variable_name}' to OUTPUT_GLOBALS: {self.OUTPUT_GLOBALS}"
+            )
         
-        Args:
-            pipeline_data: PipelineData instance
+        if not self._global_store:
+            return
             
-        Returns:
-            Raw underlying data
-        """
-        return pipeline_data.get_raw_data()
+        # Engine handles component name prefix
+        full_key = f"{self.name}__{variable_name}"
+        self._global_store.set(full_key, value, mode=mode)
     
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.name})"
     
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(name='{self.name}', config={self.config})"
+        return f"{self.__class__.__name__}(name='{self.name}', mode={self.execution_mode})"
