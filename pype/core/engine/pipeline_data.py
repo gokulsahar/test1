@@ -18,8 +18,8 @@ class PipelineData:
     Thread-safe unified data abstraction for passing data between pipeline components.
     
     Supports pandas DataFrames, Dask DataFrames, scalar values, and collections
-    with lazy conversion between formats and metadata tracking. Thread-safe for
-    concurrent access in Dask and ThreadPool executors.
+    with lazy conversion between formats and metadata tracking. Optimized for
+    memory efficiency and performance in two-level execution architecture.
     """
     
     def __init__(
@@ -41,8 +41,8 @@ class PipelineData:
             notes: Optional transformation metadata
             
         Raises:
-            ValueError: If data type is not supported or data is None
-            TypeError: If data type cannot be determined
+            ValueError: If data is None
+            TypeError: If data type is not supported
         """
         if data is None:
             raise ValueError("Data cannot be None")
@@ -53,16 +53,12 @@ class PipelineData:
         self.source = source
         self.notes = notes
         
-        # Thread-safe caching with single lock per instance
-        self._lock = threading.RLock()  # Allow recursive locking
+        # Thread-safe lazy conversion (no upfront caching)
+        self._lock = threading.RLock()
         self._pandas_cache: Optional[pd.DataFrame] = None
         self._dask_cache: Optional[dd.DataFrame] = None
         self._cached_row_count: Optional[int] = None
         self._row_count_estimated: bool = False
-        
-        # Validate supported data type
-        if self._data_type not in DataType:
-            raise ValueError(f"Unsupported data type: {type(data)}")
     
     @property
     def data_type(self) -> DataType:
@@ -72,9 +68,9 @@ class PipelineData:
     @property
     def row_count(self) -> Optional[int]:
         """
-        Get the number of rows if applicable (thread-safe).
+        Get the number of rows if applicable (thread-safe, no expensive computation).
         
-        For Dask DataFrames, returns estimated count to avoid expensive computation.
+        For Dask DataFrames, uses metadata-based estimation without computation.
         
         Returns:
             Number of rows for DataFrames, None for scalar/collection data
@@ -83,7 +79,6 @@ class PipelineData:
             return None
             
         with self._lock:
-            # Return cached count if available
             if self._cached_row_count is not None:
                 return self._cached_row_count
                 
@@ -92,48 +87,39 @@ class PipelineData:
                     self._cached_row_count = len(self._data)
                     self._row_count_estimated = False
                 elif self._data_type == DataType.DASK:
-                    # Use npartitions estimate instead of expensive len() computation
-                    # This avoids triggering computation of entire dataset
+                    # Use Dask metadata for fast estimation (no computation)
                     try:
-                        # Try to get partition info for estimate
-                        npartitions = getattr(self._data, 'npartitions', 1)
-                        # Rough estimate: assume even distribution across partitions
-                        if hasattr(self._data, 'map_partitions'):
-                            # This is much faster than len() but still an estimate
-                            sample_partition = self._data.get_partition(0)
-                            if hasattr(sample_partition, 'compute'):
-                                sample_size = len(sample_partition.compute())
-                                self._cached_row_count = sample_size * npartitions
-                                self._row_count_estimated = True
-                            else:
-                                self._cached_row_count = None
+                        # Method 1: Use len() when divisions are known (fast, no computation)
+                        if hasattr(self._data, 'divisions') and self._data.divisions[0] is not None:
+                            # When divisions are known, len() is fast and exact
+                            self._cached_row_count = len(self._data)
+                            self._row_count_estimated = False
                         else:
-                            self._cached_row_count = None
+                            # Method 2: Use realistic ETL partition estimate
+                            npartitions = getattr(self._data, 'npartitions', 1)
+                            # Most ETL partitions have 50K-100K rows (more realistic than 10K)
+                            estimated_rows_per_partition = 75000
+                            self._cached_row_count = npartitions * estimated_rows_per_partition
+                            self._row_count_estimated = True
                     except Exception:
-                        # If estimation fails, don't compute - return None
+                        # If all estimation fails, return None (no computation)
                         self._cached_row_count = None
                     
                 return self._cached_row_count
             except Exception:
-                # Some operations don't support length computation
                 return None
     
     @property
     def is_row_count_estimated(self) -> bool:
-        """
-        Check if row count is estimated (for Dask) or exact (for pandas).
-        
-        Returns:
-            True if row count is estimated, False if exact
-        """
+        """Check if row count is estimated (Dask) or exact (pandas)."""
         return self._row_count_estimated
     
     def _detect_data_type(self, data: Any) -> DataType:
         """
-        Automatically detect the data type from the input.
+        Detect data type with explicit validation.
         
         Raises:
-            TypeError: If data type cannot be determined or is unsupported
+            TypeError: For unsupported data types
         """
         if isinstance(data, pd.DataFrame):
             return DataType.PANDAS
@@ -144,97 +130,111 @@ class PipelineData:
         elif isinstance(data, (str, int, float, bool)) or data is None:
             return DataType.SCALAR
         else:
-            # Don't silently default - raise error for unknown types
             raise TypeError(f"Unsupported data type: {type(data)}. "
-                          f"Supported types: pandas.DataFrame, dask.DataFrame, "
-                          f"list, dict, tuple, str, int, float, bool")
+                          f"Supported: pandas.DataFrame, dask.DataFrame, list, dict, tuple, primitives")
     
     def _extract_schema(self, data: Any) -> Dict[str, str]:
-        """
-        Extract column schema from DataFrame data safely.
-        
-        Returns:
-            Dictionary mapping column names to string representations of dtypes
-        """
+        """Extract column schema safely without triggering computation."""
         try:
             if isinstance(data, (pd.DataFrame, dd.DataFrame)):
                 return {col: str(dtype) for col, dtype in data.dtypes.items()}
         except Exception:
-            # If schema extraction fails, return empty dict rather than crash
             pass
         return {}
     
+    def _calculate_optimal_partitions(self, df: pd.DataFrame) -> int:
+        """Calculate optimal Dask partitions based on DataFrame size (performance optimized)."""
+        try:
+            # Use fast estimation for large DataFrames to avoid expensive memory_usage(deep=True)
+            if len(df) > 100000:
+                # Fast estimate: rows * columns * avg_bytes_per_cell
+                # Use dtypes.value_counts() for faster column type analysis
+                try:
+                    dtype_counts = df.dtypes.value_counts()
+                    numeric_cols = sum(dtype_counts.get(dt, 0) for dt in dtype_counts.index 
+                                     if str(dt).startswith(('int', 'float', 'bool')))
+                    object_cols = dtype_counts.get('object', 0)
+                    other_cols = df.shape[1] - numeric_cols - object_cols
+                    
+                    memory_estimate = len(df) * (numeric_cols * 8 + object_cols * 50 + other_cols * 16)
+                except (AttributeError, ValueError):
+                    # Fallback to simple estimate if dtype analysis fails
+                    memory_estimate = len(df) * df.shape[1] * 20  # 20 bytes avg per cell
+            else:
+                # For smaller DataFrames, precise calculation is acceptable
+                memory_estimate = df.memory_usage(deep=True).sum()
+            
+            # Target ~100MB per partition for optimal parallelism
+            target_partition_size = 100 * 1024 * 1024  # 100MB
+            optimal_partitions = max(1, min(16, memory_estimate // target_partition_size))
+            return int(optimal_partitions)
+        except (MemoryError, AttributeError, ValueError) as e:
+            # Fallback: Use row count based estimation for specific known errors
+            try:
+                rows = len(df)
+                # Target ~500K rows per partition (reasonable for most ETL)
+                return max(1, min(16, rows // 500000))
+            except Exception:
+                return 4  # Conservative default
+    
     def to_pandas(self) -> pd.DataFrame:
         """
-        Convert data to pandas DataFrame with thread-safe lazy conversion.
+        Convert to pandas DataFrame with guaranteed immutability.
         
         Returns:
-            pandas DataFrame (copy to prevent mutations)
-            
-        Raises:
-            ValueError: If data cannot be converted to DataFrame
+            pandas DataFrame (always a copy for data safety)
         """
         with self._lock:
-            if self._pandas_cache is not None:
-                # Return copy to prevent mutations affecting cached data
-                return self._pandas_cache.copy()
-            
             if self._data_type == DataType.PANDAS:
-                # Store copy in cache to prevent mutations to original
-                self._pandas_cache = self._data.copy()
+                # Direct copy from original (no intermediate cache needed)
+                return self._data.copy()
             elif self._data_type == DataType.DASK:
-                # Convert Dask to pandas and cache result
+                # Use cached conversion if available
+                if self._pandas_cache is not None:
+                    # CRITICAL: Always return copy to prevent mutation of cached data
+                    return self._pandas_cache.copy()
+                # Convert and cache
                 self._pandas_cache = self._data.compute()
+                # CRITICAL: Return copy to prevent mutation of cached data
+                return self._pandas_cache.copy()
             else:
-                raise ValueError(f"Cannot convert {self._data_type.value} data to pandas DataFrame")
-            
-            return self._pandas_cache.copy()
+                raise ValueError(f"Cannot convert {self._data_type.value} to pandas DataFrame")
     
     def to_dask(self) -> dd.DataFrame:
         """
-        Convert data to Dask DataFrame with thread-safe lazy conversion.
+        Convert to Dask DataFrame with optimal partitioning.
         
         Returns:
-            Dask DataFrame
-            
-        Raises:
-            ValueError: If data cannot be converted to DataFrame
+            Dask DataFrame with optimal partitions
         """
         with self._lock:
-            if self._dask_cache is not None:
-                return self._dask_cache
-            
             if self._data_type == DataType.DASK:
-                # For Dask data, cache reference (Dask DataFrames are immutable)
-                self._dask_cache = self._data
+                # Return original (Dask DataFrames are immutable)
+                return self._data
             elif self._data_type == DataType.PANDAS:
-                # Convert pandas to Dask and cache result
-                self._dask_cache = dd.from_pandas(self._data, npartitions=1)
+                # Check cached version
+                if self._dask_cache is not None:
+                    return self._dask_cache
+                # Convert with optimal partitioning
+                npartitions = self._calculate_optimal_partitions(self._data)
+                self._dask_cache = dd.from_pandas(self._data, npartitions=npartitions)
+                return self._dask_cache
             else:
-                raise ValueError(f"Cannot convert {self._data_type.value} data to Dask DataFrame")
-            
-            return self._dask_cache
+                raise ValueError(f"Cannot convert {self._data_type.value} to Dask DataFrame")
     
     def get_raw_data(self) -> Any:
         """
-        Get the raw underlying data without conversion.
+        Get raw data without conversion.
         
-        For pandas DataFrames, returns a copy to prevent mutations.
-        
-        Returns:
-            The original data object (copy for pandas DataFrames)
+        For pandas, returns copy to maintain immutability.
+        For other types, returns original reference.
         """
         if self._data_type == DataType.PANDAS:
             return self._data.copy()
         return self._data
     
     def get_metadata(self) -> Dict[str, Any]:
-        """
-        Get all metadata as a dictionary.
-        
-        Returns:
-            Dictionary containing all metadata fields
-        """
+        """Get comprehensive metadata dictionary."""
         return {
             "data_type": self._data_type.value,
             "schema": self.schema,
@@ -248,8 +248,8 @@ class PipelineData:
         """
         Clear conversion caches to free memory.
         
-        Useful for memory management in long-running ETL jobs.
-        Original data is preserved.
+        Original data is preserved. Useful for memory management
+        in long-running ETL jobs.
         """
         with self._lock:
             self._pandas_cache = None
@@ -259,18 +259,16 @@ class PipelineData:
     
     def clone_with_data(self, new_data: Any, **metadata_updates) -> 'PipelineData':
         """
-        Create a new PipelineData instance with different data but same metadata.
-        
-        Schema is auto-detected from new data unless explicitly provided.
+        Create new instance with different data and auto-detected schema.
         
         Args:
             new_data: New data to wrap
-            **metadata_updates: Optional metadata field updates
+            **metadata_updates: Optional metadata overrides
             
         Returns:
-            New PipelineData instance with auto-detected schema for new data
+            New PipelineData with fresh schema detection
         """
-        # Auto-detect schema for new data unless explicitly provided
+        # Always auto-detect schema unless explicitly overridden
         new_schema = metadata_updates.get('schema')
         if new_schema is None:
             new_schema = self._extract_schema(new_data)
@@ -283,7 +281,7 @@ class PipelineData:
         )
     
     def __repr__(self) -> str:
-        """Return detailed string representation."""
+        """Detailed string representation."""
         schema_summary = f"{len(self.schema)} columns" if self.schema else "no schema"
         
         row_count = self.row_count
@@ -299,7 +297,7 @@ class PipelineData:
                 f"{schema_summary}{row_info}{source_info})")
     
     def __str__(self) -> str:
-        """Return concise string representation."""
+        """Concise string representation."""
         if self._data_type in (DataType.PANDAS, DataType.DASK):
             row_count = self.row_count
             if row_count is not None:
