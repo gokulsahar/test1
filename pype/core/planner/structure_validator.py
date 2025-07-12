@@ -205,7 +205,7 @@ class StructureValidator:
                 f"Isolated components found (no incoming or outgoing connections): {isolated_components}"
             )
     
-    def _mark_iterator_boundaries(self, dag: nx.DiGraph) -> None:
+    def _mark_iterator_boundaries(self, dag: nx.DiGraph) -> List[ValidationError]:
         """Mark components with their iterator boundary using recursive algorithm."""
         # Initialize all components with empty iterator boundary
         for node in dag.nodes():
@@ -216,13 +216,20 @@ class StructureValidator:
             node for node, data in dag.nodes(data=True)
             if data.get('component_type') == 'iterator'
         ]
-        
+            
+        errors: List[ValidationError] = []
         # Process each iterator recursively
         for iterator_comp in iterator_components:
-            self._mark_iterator_boundary_recursive(dag, iterator_comp, iterator_comp)
+            errors.extend(
+                self._mark_iterator_boundary_recursive(
+                    dag, iterator_comp, iterator_comp
+                )
+            )
+        return errors
     
-    def _mark_iterator_boundary_recursive(self, dag: nx.DiGraph, iterator_comp: str, boundary_name: str) -> None:
+    def _mark_iterator_boundary_recursive(self, dag: nx.DiGraph, iterator_comp: str, boundary_name: str) -> List[ValidationError]:
         """Recursively mark iterator boundary starting from iterator's data outputs."""
+        errors: List[ValidationError] = []
         # Gather all data outputs of this iterator
         data_outputs = [
             target
@@ -232,7 +239,12 @@ class StructureValidator:
         
         # Traverse from each data output under the given boundary
         for start in data_outputs:
-            self._traverse_iterator_boundary(dag, start, boundary_name, set())
+            errors.extend(
+                self._traverse_iterator_boundary(
+                    dag, start, boundary_name, set()  # fresh visited per branch
+                )
+            )
+        return errors
 
 
     def _traverse_iterator_boundary(
