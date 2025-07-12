@@ -37,7 +37,7 @@
     },
     "job_config": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "retries": {
           "type": "integer",
@@ -89,22 +89,13 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 32,
+                  "default": 2,
                   "description": "Threads per Dask worker"
                 },
                 "default_memory_per_worker": {
                   "type": "string",
                   "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
                   "description": "Default memory allocation per Dask worker"
-                },
-                "dashboard": {
-                  "type": "boolean",
-                  "description": "Enable Dask dashboard"
-                },
-                "dashboard_port": {
-                  "type": "integer",
-                  "minimum": 1024,
-                  "maximum": 65535,
-                  "description": "Port for Dask dashboard"
                 }
               }
             },
@@ -133,24 +124,6 @@
               }
             }
           }
-        },
-        "dask_config": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "memory_limit": {
-              "type": "string",
-              "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$"
-            },
-            "parallelism": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 64
-            },
-            "use_cluster": {
-              "type": "boolean"
-            }
-          }
         }
       }
     },
@@ -174,7 +147,7 @@
           "executor": {
             "type": "string",
             "enum": ["threadpool", "dask", "disk_based"],
-            "description": "Override executor for this component"
+            "description": "Component-level executor choice"
           },
           "dask_config": {
             "type": "object",

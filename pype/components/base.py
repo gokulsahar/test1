@@ -5,16 +5,13 @@ from pype.core.engine.pipeline_data import PipelineData
 
 class BaseComponent(ABC):
     """
-    Base class for all DataPY components.
-    
-    All components must override execute(). Optional lifecycle hooks:
-    - setup(): Called once before first execution  
-    - cleanup(): Called after component completes
+    Base class for all DataPY components following two-level execution architecture.    
+    Components choose their executor and handle their own configuration.
+    All components must override execute().
     """
     
     # Component metadata - override in subclasses
     COMPONENT_NAME: str = "base"
-    VERSION: str = "1.0.0"  # Required: Semantic versioning for rebuild detection
     CATEGORY: str = "unknown"
     INPUT_PORTS: List[str] = []
     OUTPUT_PORTS: List[str] = []
@@ -33,47 +30,27 @@ class BaseComponent(ABC):
         """Initialize component with name and configuration."""
         self.name = name
         self.config = config or {}
-        self._validate_config()
         self._setup_called = False
         self._cleanup_called = False
     
-    def _validate_config(self) -> None:
-        """Validate component configuration against schema."""
-        schema = self.CONFIG_SCHEMA
-        required = schema.get("required", {})
-        optional = schema.get("optional", {})
-        
-        # Type mapping for data type checks for params
-        type_mapping = {
-            "str": str,
-            "int": int,
-            "float": float,
-            "bool": bool,
-            "list": list,
-            "dict": dict
-        }
-        
-        # Check required parameters
-        for param_name, param_spec in required.items():
-            if param_name not in self.config:
-                raise ValueError(f"Missing required parameter: {param_name}")
-            
-            # Type checking for required parameters
-            expected_type_str = param_spec.get("type")
-            if expected_type_str in type_mapping:
-                expected_type = type_mapping[expected_type_str]
-                if not isinstance(self.config[param_name], expected_type):
-                    raise TypeError(f"Required parameter {param_name} must be of type {expected_type_str}")
-        
-        # Validate optional parameter types
-        for param_name, value in self.config.items():
-            if param_name in optional:
-                param_spec = optional[param_name]
-                expected_type_str = param_spec.get("type")
-                if expected_type_str in type_mapping:
-                    expected_type = type_mapping[expected_type_str]
-                    if not isinstance(value, expected_type):
-                        raise TypeError(f"Parameter {param_name} must be of type {expected_type_str}")
+    # === EXECUTOR CONFIGURATION ACCESS ===
+    
+    def get_executor_type(self) -> str:
+        """Get configured executor type for this component."""
+        return self.config.get("executor", "threadpool")
+    
+    def get_dask_config(self) -> Dict[str, Any]:
+        """Get Dask-specific configuration for this component."""
+        return self.config.get("dask_config", {})
+    
+    def get_disk_config(self) -> Dict[str, Any]:
+        """Get disk-based executor configuration for this component."""
+        return self.config.get("disk_config", {})
+    
+    def has_executor_config(self, executor_type: str) -> bool:
+        """Check if component has specific executor configuration."""
+        config_key = f"{executor_type}_config"
+        return config_key in self.config
     
     # === LIFECYCLE HOOKS (Optional - Override if needed) ===
     
@@ -119,7 +96,7 @@ class BaseComponent(ABC):
         """
         Engine-facing execution wrapper that handles lifecycle hooks.
         
-        This method is called by the engine, not by component developers.
+        This method is called by the ExecutionManager, not by component developers.
         """
         # Call setup hook if not already called
         if not self._setup_called:
@@ -135,7 +112,7 @@ class BaseComponent(ABC):
         """
         Engine-facing cleanup wrapper.
         
-        This method is called by the engine during component lifecycle cleanup.
+        This method is called by the ExecutionManager during component lifecycle cleanup.
         """
         if not self._cleanup_called:
             self.cleanup(context)
