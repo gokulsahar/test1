@@ -55,75 +55,17 @@
           "enum": ["halt", "continue"],
           "default": "halt"
         },
-        "execution": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "threadpool": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "max_workers": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 128,
-                  "description": "Shared thread pool size for all threadpool components"
-                }
-              }
-            },
-            "dask": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "enabled": {
-                  "type": "boolean",
-                  "description": "Enable Dask cluster for the job"
-                },
-                "cluster_workers": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 1024,
-                  "description": "Total number of workers in the Dask cluster"
-                },
-                "threads_per_worker": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 32,
-                  "default": 2,
-                  "description": "Threads per Dask worker"
-                },
-                "default_memory_per_worker": {
-                  "type": "string",
-                  "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
-                  "description": "Default memory allocation per Dask worker"
-                }
-              }
-            },
-            "disk_based": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "enabled": {
-                  "type": "boolean",
-                  "description": "Enable disk-based executor for lookup components"
-                },
-                "global_temp_dir": {
-                  "type": "string",
-                  "minLength": 1,
-                  "description": "Global temporary directory for all disk-based operations"
-                },
-                "global_max_cache_size": {
-                  "type": "string",
-                  "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
-                  "description": "Maximum total cache size across all disk components"
-                },
-                "compression": {
-                  "type": "boolean",
-                  "description": "Enable compression for disk cache"
-                }
-              }
-            }
-          }
+        "execution_mode": {
+          "type": "string",
+          "enum": ["pandas", "dask"],
+          "default": "pandas",
+          "description": "Job-level execution mode for all components"
+        },
+        "chunk_size": {
+          "type": "string",
+          "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
+          "default": "200MB",
+          "description": "Data chunk size for dask mode processing"
         }
       }
     },
@@ -143,55 +85,6 @@
           "type": {
             "type": "string",
             "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$"
-          },
-          "executor": {
-            "type": "string",
-            "enum": ["threadpool", "dask", "disk_based"],
-            "description": "Component-level executor choice"
-          },
-          "dask_config": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "workers": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 128,
-                "description": "Number of workers to allocate from cluster for this component"
-              },
-              "memory_per_worker": {
-                "type": "string",
-                "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
-                "description": "Memory allocation per worker for this component"
-              }
-            }
-          },
-          "disk_config": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "cache_size": {
-                "type": "string",
-                "pattern": "^\\d+(\\.\\d+)?[KMGT]?B$",
-                "description": "Cache size for this component's disk operations"
-              },
-              "table_file": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Source file for lookup table (parquet, csv, etc.)"
-              },
-              "lookup_column": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Primary lookup column for indexing"
-              },
-              "chunk_size": {
-                "type": "integer",
-                "minimum": 1000,
-                "maximum": 1000000,
-                "description": "Chunk size for loading large tables"
-              }
-            }
           },
           "params": {
             "type": "object",
