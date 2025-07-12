@@ -24,7 +24,7 @@ PLANNER_VERSION = "1.0.0"
 
 @dataclass
 class PlanResult:
-    """Industry-standard planning result with comprehensive metadata."""
+    """Industry-standard planning result with comprehensive metadata for two-level execution."""
     # Core execution artifacts
     dag: nx.DiGraph                                    # Rich DAG with full metadata
     subjob_components: Dict[str, List[str]]            # {subjob_id: [component_names]}
@@ -34,7 +34,7 @@ class PlanResult:
     validation_errors: List[ValidationError]           # All collected errors
     validation_warnings: List[ValidationWarning]       # All collected warnings
     
-    # Runtime optimization
+    # Runtime optimization for two-level architecture
     execution_metadata: Dict[str, Any]                 # Performance optimization data
     
     # Diagnostics and debugging
@@ -63,7 +63,7 @@ class PlanningPhaseError(PlanningError):
 
 
 class JobPlanner:
-    """Orchestrates complete job planning process with comprehensive error handling."""
+    """Orchestrates complete job planning process with two-level execution architecture support."""
     
     def __init__(self, registry: ComponentRegistry):
         """
@@ -102,9 +102,9 @@ class JobPlanner:
             # Execute all planning phases
             dag, subjob_components, subjob_metadata = self._execute_planning_phases(job_model)
             
-            # Generate execution metadata
+            # Generate execution metadata for two-level architecture
             execution_metadata = self._generate_execution_metadata(
-                dag, subjob_components, subjob_metadata
+                dag, subjob_components, subjob_metadata, job_model
             )
             
             # Generate planning diagnostics
@@ -113,7 +113,7 @@ class JobPlanner:
             )
             
             # Create build metadata
-            build_metadata = self._create_build_metadata(dag)
+            build_metadata = self._create_build_metadata(dag, job_model)
             
             # Build final result
             plan_result = self._build_plan_result(
@@ -149,13 +149,13 @@ class JobPlanner:
         Returns:
             (final_dag, subjob_components, subjob_metadata)
         """
-        # Phase 2: Graph Building (no joblet processing in planner)
+        # Phase 2: Graph Building with executor validation
         dag = self._phase_2_graph_building(job_model)
         
         # Phase 3: Port Resolution
         dag = self._phase_3_port_resolution(dag)
         
-        # Phase 4: Subjob Analysis
+        # Phase 4: Subjob Analysis with execution waves
         subjob_components, subjob_metadata = self._phase_4_subjob_analysis(dag)
         
         # Phase 5: Structure Validation
@@ -165,7 +165,7 @@ class JobPlanner:
     
     def _phase_2_graph_building(self, job_model: JobModel) -> nx.DiGraph:
         """
-        Phase 2: Build core DAG structure with industry-standard metadata.
+        Phase 2: Build core DAG structure with executor validation.
         
         Args:
             job_model: Expanded JobModel
@@ -266,12 +266,6 @@ class JobPlanner:
                     ) for error in errors]
                 )
             
-            # Extract execution order from metadata
-            execution_order = []
-            for subjob_id in sorted(subjob_metadata.keys(), 
-                                   key=lambda x: subjob_metadata[x].get('execution_order', 0)):
-                execution_order.append(subjob_id)
-            
             return subjob_components, subjob_metadata
             
         except SubjobAnalysisError as e:
@@ -321,9 +315,10 @@ class JobPlanner:
     
     def _generate_execution_metadata(self, dag: nx.DiGraph, 
                                    subjob_components: Dict[str, List[str]], 
-                                   subjob_metadata: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+                                   subjob_metadata: Dict[str, Dict[str, Any]],
+                                   job_model: JobModel) -> Dict[str, Any]:
         """
-        Generate comprehensive execution metadata for runtime optimization.
+        Generate comprehensive execution metadata for two-level architecture runtime optimization.
         
         Purpose: Eliminate ALL runtime registry/DAG queries for maximum performance
         """
@@ -333,13 +328,13 @@ class JobPlanner:
             if data.get('startable', False)
         ]
         
-        # Create component dependency cache
+        # Create component dependency cache for Level 1 (Orchestrator)
         component_dependencies = self._create_dependency_resolution_cache(dag)
         
-        # Create port mapping cache
+        # Create port mapping cache for data flow
         port_mapping = self._create_port_mapping_optimization(dag)
         
-        # Extract idempotent components
+        # Extract idempotent components for resume logic
         idempotent_components = {
             node for node, data in dag.nodes(data=True)
             if data.get('idempotent', True)
@@ -347,6 +342,9 @@ class JobPlanner:
         
         # Calculate execution estimates
         execution_estimates = self._calculate_execution_estimates(dag, subjob_metadata)
+        
+        # Generate executor allocation plan for Level 2 (ExecutionManager)
+        executor_allocation_plan = self._generate_executor_allocation_plan(dag, job_model)
         
         # Optimize checkpoint strategy
         checkpoint_strategy = self._optimize_checkpoint_strategy(subjob_metadata)
@@ -366,10 +364,13 @@ class JobPlanner:
                 'dependencies': data.get('dependencies', []),
                 'iterator_boundary': data.get('iterator_boundary', ''),
                 'is_subjob_start': data.get('is_subjob_start', False),
-                'subjob_id': self._get_component_subjob(node, subjob_components)
+                'subjob_id': self._get_component_subjob(node, subjob_components),
+                'executor': data.get('executor', 'threadpool'),
+                'executor_config': data.get('executor_config', {})
             }
         
         return {
+            # Level 1: Orchestrator metadata
             'startable_components': startable_components,
             'component_dependencies': component_dependencies,
             'port_mapping': port_mapping,
@@ -378,12 +379,86 @@ class JobPlanner:
             'checkpoint_strategy': checkpoint_strategy,
             'parallel_execution_plan': self._create_parallel_execution_plan(subjob_metadata),
             'idempotent_components': list(idempotent_components),
+            
+            # Level 2: ExecutionManager metadata
+            'executor_allocation_plan': executor_allocation_plan,
+            'resource_requirements': execution_estimates.get('resource_requirements', {}),
             'estimated_execution_time': execution_estimates.get('total_estimated_runtime_seconds', 0),
-            'resource_requirements': {
-                'memory_requirements_mb': execution_estimates.get('memory_requirements_mb', 512),
-                'cpu_intensity': execution_estimates.get('cpu_intensity', 'medium'),
-                'io_intensity': execution_estimates.get('io_intensity', 'medium')
+            
+            # Job-level configuration
+            'job_config': self._extract_job_config_metadata(job_model)
+        }
+    
+    def _generate_executor_allocation_plan(self, dag: nx.DiGraph, job_model: JobModel) -> Dict[str, Any]:
+        """Generate executor allocation plan for ExecutionManager."""
+        threadpool_components = []
+        dask_components = []
+        disk_components = []
+        
+        total_dask_workers = 0
+        total_disk_cache = 0
+        
+        # Analyze component executor requirements
+        for node, data in dag.nodes(data=True):
+            executor = data.get('executor', 'threadpool')
+            executor_config = data.get('executor_config', {})
+            
+            if executor == 'threadpool':
+                threadpool_components.append({
+                    'component': node,
+                    'config': executor_config
+                })
+            elif executor == 'dask':
+                dask_config = executor_config.get('dask_config', {})
+                workers = dask_config.get('workers', 1)
+                total_dask_workers += workers
+                
+                dask_components.append({
+                    'component': node,
+                    'workers': workers,
+                    'memory_per_worker': dask_config.get('memory_per_worker'),
+                    'config': dask_config
+                })
+            elif executor == 'disk_based':
+                disk_config = executor_config.get('disk_config', {})
+                cache_size = self._parse_size_string(disk_config.get('cache_size', '1GB'))
+                total_disk_cache += cache_size
+                
+                disk_components.append({
+                    'component': node,
+                    'cache_size_bytes': cache_size,
+                    'table_file': disk_config.get('table_file'),
+                    'lookup_column': disk_config.get('lookup_column'),
+                    'config': disk_config
+                })
+        
+        # Extract job-level executor configuration
+        job_execution_config = {}
+        if hasattr(job_model.job_config, 'execution'):
+            job_execution_config = {
+                'threadpool': getattr(job_model.job_config.execution, 'threadpool', None),
+                'dask': getattr(job_model.job_config.execution, 'dask', None),
+                'disk_based': getattr(job_model.job_config.execution, 'disk_based', None)
             }
+        
+        return {
+            'threadpool_components': threadpool_components,
+            'dask_components': dask_components,
+            'disk_components': disk_components,
+            'total_dask_workers_needed': total_dask_workers,
+            'total_disk_cache_needed_bytes': total_disk_cache,
+            'job_executor_config': job_execution_config,
+            'requires_dask_cluster': len(dask_components) > 0,
+            'requires_disk_cache': len(disk_components) > 0
+        }
+    
+    def _extract_job_config_metadata(self, job_model: JobModel) -> Dict[str, Any]:
+        """Extract job configuration metadata for runtime."""
+        return {
+            'retries': job_model.job_config.retries,
+            'timeout': job_model.job_config.timeout,
+            'fail_strategy': job_model.job_config.fail_strategy,
+            'execution_config': getattr(job_model.job_config, 'execution', None)
         }
     
     def _get_component_subjob(self, component: str, subjob_components: Dict[str, List[str]]) -> str:
@@ -467,18 +542,22 @@ class JobPlanner:
         estimated_time_per_component = 1.0  # seconds
         memory_per_component = 50  # MB
         
-        # Calculate parallelism factor
-        parallel_groups = set()
-        for metadata in subjob_metadata.values():
-            parallel_groups.add(metadata.get('parallel_group', 0))
-        parallelism_factor = len(parallel_groups) / subjob_count if subjob_count > 0 else 1.0
+        # Calculate parallelism factor from execution waves
+        max_parallel_subjobs = 1
+        if subjob_metadata:
+            execution_waves = list(subjob_metadata.values())[0].get('execution_waves', [[]])
+            max_parallel_subjobs = max(len(wave) for wave in execution_waves) if execution_waves else 1
+        
+        parallelism_factor = max_parallel_subjobs / subjob_count if subjob_count > 0 else 1.0
         
         return {
             'total_estimated_runtime_seconds': int(component_count * estimated_time_per_component / parallelism_factor),
-            'memory_requirements_mb': component_count * memory_per_component,
-            'cpu_intensity': 'high' if component_count > 50 else 'medium',
-            'io_intensity': 'high' if edge_count > 100 else 'medium',
-            'parallelism_factor': parallelism_factor
+            'resource_requirements': {
+                'memory_requirements_mb': component_count * memory_per_component,
+                'cpu_intensity': 'high' if component_count > 50 else 'medium',
+                'io_intensity': 'high' if edge_count > 100 else 'medium',
+                'parallelism_factor': parallelism_factor
+            }
         }
     
     def _optimize_checkpoint_strategy(self, subjob_metadata: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -504,20 +583,42 @@ class JobPlanner:
         return checkpoint_strategy
     
     def _create_parallel_execution_plan(self, subjob_metadata: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        """Create parallel execution optimization plan."""
-        parallel_groups = {}
+        """Create parallel execution optimization plan for asyncio orchestration."""
+        if not subjob_metadata:
+            return {'execution_waves': [], 'max_parallelism': 1, 'wave_count': 0}
         
-        for subjob_id, metadata in subjob_metadata.items():
-            group = metadata.get('parallel_group', 0)
-            if group not in parallel_groups:
-                parallel_groups[group] = []
-            parallel_groups[group].append(subjob_id)
+        # Extract execution waves from subjob metadata
+        execution_waves = []
+        sample_metadata = list(subjob_metadata.values())[0]
+        if 'execution_waves' in sample_metadata:
+            execution_waves = sample_metadata['execution_waves']
         
         return {
-            'parallel_groups': parallel_groups,
-            'max_parallelism': max(len(group) for group in parallel_groups.values()) if parallel_groups else 1,
-            'execution_waves': len(parallel_groups)
+            'execution_waves': execution_waves,
+            'max_parallelism': max(len(wave) for wave in execution_waves) if execution_waves else 1,
+            'wave_count': len(execution_waves)
         }
+    
+    def _parse_size_string(self, size_str: str) -> int:
+        """Parse size string like '1GB' to bytes."""
+        if not size_str:
+            return 0
+            
+        size_str = size_str.upper().strip()
+        multipliers = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
+        
+        for suffix, multiplier in multipliers.items():
+            if size_str.endswith(suffix):
+                try:
+                    number = float(size_str[:-len(suffix)])
+                    return int(number * multiplier)
+                except ValueError:
+                    return 0
+        
+        try:
+            return int(float(size_str))  # Assume bytes if no suffix
+        except ValueError:
+            return 0
     
     def _generate_planning_diagnostics(self, dag: nx.DiGraph, 
                                      subjob_components: Dict[str, List[str]], 
@@ -542,8 +643,13 @@ class JobPlanner:
         except:
             max_path_depth = 0
         
-        # Count parallel subjobs
-        parallel_subjobs = sum(1 for sid in subjob_components.keys() if '_parallel_' in sid)
+        # Count parallel subjobs from execution waves
+        parallel_subjobs = 0
+        if subjob_components:
+            sample_metadata = list(subjob_components.values())[0] if subjob_components else []
+            # Estimate parallel capability from subjob count
+            parallel_subjobs = min(len(subjob_components), 4)  # Conservative estimate
+        
         parallelism_factor = parallel_subjobs / len(subjob_components) if subjob_components else 0
         
         return {
@@ -582,12 +688,14 @@ class JobPlanner:
             error_counts[code] = error_counts.get(code, 0) + 1
         return error_counts
     
-    def _create_build_metadata(self, dag: nx.DiGraph) -> Dict[str, Any]:
+    def _create_build_metadata(self, dag: nx.DiGraph, job_model: JobModel) -> Dict[str, Any]:
         """Create build metadata for the plan."""
         return {
             'build_timestamp': datetime.now().isoformat(),
             'engine_version': ENGINE_VERSION,
             'planner_version': PLANNER_VERSION,
+            'job_name': job_model.job.name,
+            'job_version': job_model.job.version,
             'component_count': len(dag.nodes()),
             'edge_count': len(dag.edges()),
             'data_edge_count': sum(1 for _, _, d in dag.edges(data=True) if d.get('edge_type') == 'data'),
@@ -606,7 +714,7 @@ class JobPlanner:
         Construct final PlanResult with comprehensive validation.
         
         Returns:
-            Complete PlanResult ready for engine execution
+            Complete PlanResult ready for two-level engine execution
         """
         # Extract execution order
         subjob_execution_order = []
@@ -632,7 +740,7 @@ class JobPlanner:
     
     def _validate_plan_result_completeness(self, plan_result: PlanResult) -> None:
         """
-        Final validation that PlanResult meets industry standards.
+        Final validation that PlanResult meets two-level architecture requirements.
         
         Raises:
             PlanResultValidationError: If plan result is incomplete
@@ -647,6 +755,10 @@ class JobPlanner:
                 raise PlanResultValidationError(
                     f"Node '{node}' missing registry_metadata"
                 )
+            if 'executor' not in data:
+                raise PlanResultValidationError(
+                    f"Node '{node}' missing executor metadata"
+                )
         
         # Check all components assigned to subjobs
         all_nodes = set(plan_result.dag.nodes())
@@ -660,15 +772,24 @@ class JobPlanner:
                 f"Components not assigned to subjobs: {unassigned}"
             )
         
-        # Check execution metadata completeness
+        # Check execution metadata completeness for two-level architecture
         required_metadata_keys = [
             'startable_components', 'component_dependencies', 
-            'port_mapping', 'node_metadata'
+            'port_mapping', 'node_metadata', 'executor_allocation_plan'
         ]
         for key in required_metadata_keys:
             if key not in plan_result.execution_metadata:
                 raise PlanResultValidationError(
                     f"Missing required execution metadata: {key}"
+                )
+        
+        # Validate executor allocation plan completeness
+        executor_plan = plan_result.execution_metadata.get('executor_allocation_plan', {})
+        required_executor_keys = ['threadpool_components', 'dask_components', 'disk_components']
+        for key in required_executor_keys:
+            if key not in executor_plan:
+                raise PlanResultValidationError(
+                    f"Missing required executor allocation metadata: {key}"
                 )
     
     def serialize_dag_for_pjob(self, dag: nx.DiGraph) -> Dict[str, Any]:
