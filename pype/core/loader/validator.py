@@ -87,8 +87,245 @@ def validate_global_variable_references(job_data: Dict[str, Any]) -> List[str]:
     return errors
 
 
+def validate_executor_configuration(job_data: Dict[str, Any]) -> List[str]:
+    """Validate executor configuration consistency and constraints."""
+    errors = []
+    
+    # Extract job-level execution config
+    job_config = job_data.get("job_config", {})
+    execution_config = job_config.get("execution", {})
+    
+    # Extract components
+    components = job_data.get("components", [])
+    
+    # Validate dask configuration consistency
+    errors.extend(_validate_dask_consistency(execution_config, components))
+    
+    # Validate disk_based configuration consistency  
+    errors.extend(_validate_disk_consistency(execution_config, components))
+    
+    # Validate component executor fields
+    errors.extend(_validate_component_executor_fields(components))
+    
+    # Validate resource allocation
+    errors.extend(_validate_resource_allocation(execution_config, components))
+    
+    return errors
+
+
+def _validate_dask_consistency(execution_config: Dict[str, Any], components: List[Dict[str, Any]]) -> List[str]:
+    """Validate dask executor consistency between job-level and component-level config."""
+    errors = []
+    
+    # Find components using dask executor
+    dask_components = [comp for comp in components if comp.get("executor") == "dask"]
+    
+    if dask_components:
+        dask_config = execution_config.get("dask", {})
+        
+        # Check if dask is enabled at job level
+        if not dask_config.get("enabled", False):
+            comp_names = [comp["name"] for comp in dask_components]
+            errors.append(
+                f"Components {comp_names} use dask executor but job_config.execution.dask.enabled is not true"
+            )
+        
+        # Validate dask_config fields for each component
+        for comp in dask_components:
+            comp_dask_config = comp.get("dask_config", {})
+            if comp_dask_config:
+                comp_errors = _validate_dask_config_fields(comp["name"], comp_dask_config)
+                errors.extend(comp_errors)
+    
+    return errors
+
+
+def _validate_disk_consistency(execution_config: Dict[str, Any], components: List[Dict[str, Any]]) -> List[str]:
+    """Validate disk_based executor consistency between job-level and component-level config."""
+    errors = []
+    
+    # Find components using disk_based executor
+    disk_components = [comp for comp in components if comp.get("executor") == "disk_based"]
+    
+    if disk_components:
+        disk_config = execution_config.get("disk_based", {})
+        
+        # Check if disk_based is enabled at job level
+        if not disk_config.get("enabled", False):
+            comp_names = [comp["name"] for comp in disk_components]
+            errors.append(
+                f"Components {comp_names} use disk_based executor but job_config.execution.disk_based.enabled is not true"
+            )
+        
+        # Validate disk_config fields for each component
+        for comp in disk_components:
+            comp_disk_config = comp.get("disk_config", {})
+            if comp_disk_config:
+                comp_errors = _validate_disk_config_fields(comp["name"], comp_disk_config)
+                errors.extend(comp_errors)
+    
+    return errors
+
+
+def _validate_component_executor_fields(components: List[Dict[str, Any]]) -> List[str]:
+    """Validate component executor field consistency."""
+    errors = []
+    
+    for comp in components:
+        comp_name = comp.get("name", "unknown")
+        executor = comp.get("executor")
+        
+        # Validate executor type
+        if executor and executor not in ["threadpool", "dask", "disk_based"]:
+            errors.append(
+                f"Component '{comp_name}' has invalid executor '{executor}'. "
+                f"Must be one of: threadpool, dask, disk_based"
+            )
+        
+        # Validate dask_config only exists when executor is dask
+        if comp.get("dask_config") and executor != "dask":
+            errors.append(
+                f"Component '{comp_name}' has dask_config but executor is '{executor}'. "
+                f"dask_config can only be used with executor: dask"
+            )
+        
+        # Validate disk_config only exists when executor is disk_based
+        if comp.get("disk_config") and executor != "disk_based":
+            errors.append(
+                f"Component '{comp_name}' has disk_config but executor is '{executor}'. "
+                f"disk_config can only be used with executor: disk_based"
+            )
+    
+    return errors
+
+
+def _validate_dask_config_fields(comp_name: str, dask_config: Dict[str, Any]) -> List[str]:
+    """Validate dask_config field values."""
+    errors = []
+    
+    # Validate workers field
+    workers = dask_config.get("workers")
+    if workers is not None:
+        if not isinstance(workers, int) or workers < 1:
+            errors.append(
+                f"Component '{comp_name}' dask_config.workers must be a positive integer, got: {workers}"
+            )
+    
+    # Validate memory_per_worker field
+    memory_per_worker = dask_config.get("memory_per_worker")
+    if memory_per_worker is not None:
+        if not _is_valid_memory_size(memory_per_worker):
+            errors.append(
+                f"Component '{comp_name}' dask_config.memory_per_worker must match pattern like '4GB', '2048MB', got: {memory_per_worker}"
+            )
+    
+    # Check for unknown fields
+    valid_fields = {"workers", "memory_per_worker", "threads_per_worker"}
+    unknown_fields = set(dask_config.keys()) - valid_fields
+    if unknown_fields:
+        errors.append(
+            f"Component '{comp_name}' dask_config has unknown fields: {unknown_fields}. "
+            f"Valid fields: {valid_fields}"
+        )
+    
+    return errors
+
+
+def _validate_disk_config_fields(comp_name: str, disk_config: Dict[str, Any]) -> List[str]:
+    """Validate disk_config field values."""
+    errors = []
+    
+    # Validate cache_size field
+    cache_size = disk_config.get("cache_size")
+    if cache_size is not None:
+        if not _is_valid_memory_size(cache_size):
+            errors.append(
+                f"Component '{comp_name}' disk_config.cache_size must match pattern like '2GB', '500MB', got: {cache_size}"
+            )
+    
+    # Validate table_file field
+    table_file = disk_config.get("table_file")
+    if table_file is not None:
+        if not isinstance(table_file, str) or not table_file.strip():
+            errors.append(
+                f"Component '{comp_name}' disk_config.table_file must be a non-empty string"
+            )
+    
+    # Validate lookup_column field
+    lookup_column = disk_config.get("lookup_column")
+    if lookup_column is not None:
+        if not isinstance(lookup_column, str) or not lookup_column.strip():
+            errors.append(
+                f"Component '{comp_name}' disk_config.lookup_column must be a non-empty string"
+            )
+    
+    # Validate chunk_size field
+    chunk_size = disk_config.get("chunk_size")
+    if chunk_size is not None:
+        if not isinstance(chunk_size, int) or chunk_size < 1000:
+            errors.append(
+                f"Component '{comp_name}' disk_config.chunk_size must be an integer >= 1000, got: {chunk_size}"
+            )
+    
+    # Check for unknown fields
+    valid_fields = {"cache_size", "table_file", "lookup_column", "chunk_size"}
+    unknown_fields = set(disk_config.keys()) - valid_fields
+    if unknown_fields:
+        errors.append(
+            f"Component '{comp_name}' disk_config has unknown fields: {unknown_fields}. "
+            f"Valid fields: {valid_fields}"
+        )
+    
+    return errors
+
+
+def _validate_resource_allocation(execution_config: Dict[str, Any], components: List[Dict[str, Any]]) -> List[str]:
+    """Validate resource allocation doesn't exceed job-level pools."""
+    errors = []
+    
+    # Validate Dask worker allocation
+    dask_config = execution_config.get("dask", {})
+    if dask_config.get("enabled"):
+        cluster_workers = dask_config.get("cluster_workers", 0)
+        
+        if cluster_workers > 0:
+            total_requested_workers = 0
+            for comp in components:
+                if comp.get("executor") == "dask":
+                    comp_dask_config = comp.get("dask_config", {})
+                    workers = comp_dask_config.get("workers", 1)  # Default to 1 if not specified
+                    total_requested_workers += workers
+            
+            if total_requested_workers > cluster_workers:
+                errors.append(
+                    f"Dask resource over-allocation: {total_requested_workers} workers requested "
+                    f"but only {cluster_workers} available in cluster. "
+                    f"Either increase job_config.execution.dask.cluster_workers or reduce component worker allocations."
+                )
+    
+    # Validate reasonable limits
+    disk_component_count = sum(1 for comp in components if comp.get("executor") == "disk_based")
+    if disk_component_count > 10:
+        errors.append(
+            f"Too many disk_based components ({disk_component_count}). "
+            f"Consider consolidating lookups or using different executors for better performance."
+        )
+    
+    return errors
+
+
+def _is_valid_memory_size(memory_str: str) -> bool:
+    """Validate memory size string format like '2GB', '500MB'."""
+    if not isinstance(memory_str, str):
+        return False
+    
+    # Pattern: number + optional decimal + optional unit + B
+    pattern = r'^\d+(\.\d+)?[KMGT]?B$'
+    return bool(re.match(pattern, memory_str))
+
+
 def validate_job_file(file_path: Path) -> List[str]:
-    """Validate job YAML file against all rules."""
+    """Validate job YAML file against all rules including executor configuration."""
     try:
         import ruamel.yaml
         yaml = ruamel.yaml.YAML(typ='safe')
@@ -104,8 +341,9 @@ def validate_job_file(file_path: Path) -> List[str]:
     # Schema validation (includes structure, syntax, patterns)
     errors = validate_job_schema(job_data)
     
-    # Business logic validation
-    if not errors:  # Only if schema validation passed
+    # Business logic validation (only if schema validation passed)
+    if not errors:
         errors.extend(validate_global_variable_references(job_data))
+        errors.extend(validate_executor_configuration(job_data))
     
     return errors

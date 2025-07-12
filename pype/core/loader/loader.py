@@ -7,12 +7,19 @@ from pype.core.loader.templater import resolve_template_yaml, TemplateError
 from pype.core.utils.constants import DEFAULT_ENCODING
 
 
+class ExecutionConfigModel(BaseModel):
+    """Pydantic model for execution configuration."""
+    threadpool: Optional[Dict[str, Any]] = None
+    dask: Optional[Dict[str, Any]] = None
+    disk_based: Optional[Dict[str, Any]] = None
+
+
 class JobConfigModel(BaseModel):
     """Pydantic model for job configuration."""
     retries: int = Field(default=1, ge=0, le=10)
     timeout: int = Field(default=3600, ge=1)
     fail_strategy: str = Field(default="halt")
-    dask_config: Optional[Dict[str, Any]] = None
+    execution: Optional[ExecutionConfigModel] = None
 
 
 class JobMetadataModel(BaseModel):
@@ -29,6 +36,9 @@ class ComponentModel(BaseModel):
     """Pydantic model for component definition."""
     name: str = Field(max_length=64)
     type: str
+    executor: Optional[str] = None
+    dask_config: Optional[Dict[str, Any]] = None
+    disk_config: Optional[Dict[str, Any]] = None
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -104,36 +114,6 @@ def load_job_yaml(file_path: Path, context: Optional[Dict[str, Any]] = None) -> 
             raise LoaderError(f"Unexpected error during template resolution: {e}")
     
     # Step 4: Create Pydantic model (final validation layer)
-    try:
-        return JobModel(**job_data)
-    except Exception as e:
-        raise LoaderError(f"Job model validation failed: {e}")
-
-#for tests or apis
-def load_job_from_dict(job_data: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> JobModel:
-    """
-    Load job from dictionary data with validation.
-    
-    Args:
-        job_data: Job data as dictionary
-        context: Optional context variables for template resolution
-        
-    Returns:
-        Validated JobModel instance
-        
-    Raises:
-        LoaderError: If validation fails
-    """
-    # Template resolution (if context provided)
-    if context:
-        try:
-            job_data = resolve_template_yaml(job_data, context)
-        except TemplateError as e:
-            raise LoaderError(f"Template resolution failed: {e}")
-        except Exception as e:
-            raise LoaderError(f"Unexpected error during template resolution: {e}")
-    
-    # Create and validate Pydantic model
     try:
         return JobModel(**job_data)
     except Exception as e:
