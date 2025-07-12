@@ -7,19 +7,46 @@ from pype.core.loader.templater import resolve_template_yaml, TemplateError
 from pype.core.utils.constants import DEFAULT_ENCODING
 
 
+class ThreadpoolConfigModel(BaseModel):
+    """Pydantic model for threadpool execution configuration."""
+    max_workers: int = Field(default=8, ge=1, le=128)
+
+
+class DaskConfigModel(BaseModel):
+    """Pydantic model for dask execution configuration."""
+    cluster_workers: Optional[int] = Field(default=None, ge=1, le=1024)
+    threads_per_worker: int = Field(default=2, ge=1, le=32)
+    memory_per_worker: str = Field(default="4GB")
+
+
 class ExecutionConfigModel(BaseModel):
     """Pydantic model for execution configuration."""
-    threadpool: Optional[Dict[str, Any]] = None
-    dask: Optional[Dict[str, Any]] = None
-    disk_based: Optional[Dict[str, Any]] = None
+    threadpool: Optional[ThreadpoolConfigModel] = None
+    dask: Optional[DaskConfigModel] = None
 
 
 class JobConfigModel(BaseModel):
     """Pydantic model for job configuration."""
-    retries: int = Field(default=1, ge=0, le=10)
+    retries: int = Field(default=1, ge=0, le=3)
     timeout: int = Field(default=3600, ge=1)
     fail_strategy: str = Field(default="halt")
+    execution_mode: str = Field(default="pandas")
+    chunk_size: str = Field(default="200MB")
     execution: Optional[ExecutionConfigModel] = None
+
+    @field_validator('fail_strategy')
+    @classmethod
+    def validate_fail_strategy(cls, v):
+        if v not in ["halt", "continue"]:
+            raise ValueError("fail_strategy must be 'halt' or 'continue'")
+        return v
+
+    @field_validator('execution_mode')
+    @classmethod
+    def validate_execution_mode(cls, v):
+        if v not in ["pandas", "dask"]:
+            raise ValueError("execution_mode must be 'pandas' or 'dask'")
+        return v
 
 
 class JobMetadataModel(BaseModel):
@@ -36,9 +63,6 @@ class ComponentModel(BaseModel):
     """Pydantic model for component definition."""
     name: str = Field(max_length=64)
     type: str
-    executor: Optional[str] = None
-    dask_config: Optional[Dict[str, Any]] = None
-    disk_config: Optional[Dict[str, Any]] = None
     params: Dict[str, Any] = Field(default_factory=dict)
 
 

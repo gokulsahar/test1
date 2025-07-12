@@ -88,11 +88,6 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": {
-                  "type": "boolean",
-                  "default": false,
-                  "description": "Enable dask cluster for the job"
-                },
                 "cluster_workers": {
                   "type": "integer",
                   "minimum": 1,
