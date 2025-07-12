@@ -21,6 +21,11 @@ class InvalidConnectionError(GraphBuildError):
     pass
 
 
+class ExecutorConfigurationError(GraphBuildError):
+    """Raised when executor configuration is invalid."""
+    pass
+
+
 class GraphBuilder:
     """Core graph builder for converting JobModel to NetworkX DiGraph."""
     
@@ -46,7 +51,7 @@ class GraphBuilder:
         
         # Create component nodes with validation
         try:
-            self._create_component_nodes(dag, job_model.components)
+            self._create_component_nodes(dag, job_model.components, job_model.job_config)
         except GraphBuildError as e:
             errors.append(str(e))
         
@@ -68,8 +73,8 @@ class GraphBuilder:
         
         return dag
     
-    def _create_component_nodes(self, dag: nx.DiGraph, components: List[ComponentModel]) -> None:
-        """Create nodes with rich metadata and validate required parameters."""
+    def _create_component_nodes(self, dag: nx.DiGraph, components: List[ComponentModel], job_config: Any) -> None:
+        """Create nodes with rich metadata and validate executor configuration."""
         for component in components:
             registry_metadata = self._validate_component_exists(component.type)
             
@@ -81,6 +86,9 @@ class GraphBuilder:
             self._validate_required_parameters(component.name, component.type, 
                                             registry_metadata.get('required_params', {}), 
                                             component.params)
+            
+            # Validate executor configuration
+            self._validate_executor_configuration(component, job_config)
             
             # Filter out timestamp columns to reduce metadata size
             filtered_metadata = {k: v for k, v in registry_metadata.items() 
@@ -95,8 +103,55 @@ class GraphBuilder:
                 'registry_metadata': filtered_metadata,
                 'input_ports': registry_metadata['input_ports'],
                 'output_ports': registry_metadata['output_ports'],
-                'dependencies': registry_metadata['dependencies']
+                'dependencies': registry_metadata['dependencies'],
+                # Add executor information for execution manager
+                'executor': component.params.get('executor', 'threadpool'),
+                'executor_config': self._extract_executor_config(component)
             })
+
+    def _validate_executor_configuration(self, component: ComponentModel, job_config: Any) -> None:
+        """Validate component executor configuration against job-level settings."""
+        executor = component.params.get('executor', 'threadpool')
+        
+        # Check if requested executor is enabled at job level
+        if hasattr(job_config, 'execution'):
+            execution_config = job_config.execution
+            
+            if executor == 'dask':
+                dask_config = getattr(execution_config, 'dask', None)
+                if not dask_config or not getattr(dask_config, 'enabled', False):
+                    raise ExecutorConfigurationError(
+                        f"Component '{component.name}' requests Dask executor but Dask is disabled in job_config"
+                    )
+                
+                # Validate required disk configuration
+                component_disk_config = component.params.get('disk_config', {})
+                if not component_disk_config.get('table_file'):
+                    raise ExecutorConfigurationError(
+                        f"Disk-based component '{component.name}' missing required 'table_file' in disk_config"
+                    )
+            
+            elif executor == 'disk_based':
+                disk_config = getattr(execution_config, 'disk_based', None)
+                if not disk_config or not getattr(disk_config, 'enabled', False):
+                    raise ExecutorConfigurationError(
+                        f"Component '{component.name}' requests disk_based executor but it's disabled in job_config"
+                    )
+    
+    def _extract_executor_config(self, component: ComponentModel) -> Dict[str, Any]:
+        """Extract executor-specific configuration from component."""
+        executor_config = {}
+        
+        if 'executor' in component.params:
+            executor_config['executor'] = component.params['executor']
+        
+        if 'dask_config' in component.params:
+            executor_config['dask_config'] = component.params['dask_config']
+        
+        if 'disk_config' in component.params:
+            executor_config['disk_config'] = component.params['disk_config']
+        
+        return executor_config
 
     def _validate_required_parameters(self, component_name: str, component_type: str, 
                                     required_params: Dict[str, Any], config: Dict[str, Any]) -> None:
@@ -140,11 +195,9 @@ class GraphBuilder:
             raise ComponentNotFoundError(f"Component type '{component_type}' not found in registry")
         return metadata
     
-    def _create_data_edges(self, dag: nx.DiGraph, data_connections: Dict[str, Any]) -> None:
+    def _create_data_edges(self, dag: nx.DiGraph, data_connections: List[str]) -> None:
         """Create data edges from connections.data section."""
-        connections = data_connections if isinstance(data_connections, list) else list(data_connections.keys())
-        
-        for connection_str in connections:
+        for connection_str in data_connections:
             source_comp, source_port, target_comp, target_port = self._parse_data_connection(connection_str)
             
             # Check for duplicate connections between same components
@@ -215,12 +268,11 @@ class GraphBuilder:
         
         return match.groups()
     
-    def _validate_data_connections(self, dag: nx.DiGraph, data_connections: Dict[str, Any]) -> List[str]:
+    def _validate_data_connections(self, dag: nx.DiGraph, data_connections: List[str]) -> List[str]:
         """Validate data connections reference existing components."""
         errors = []
-        connections = data_connections if isinstance(data_connections, list) else list(data_connections.keys())
         
-        for connection_str in connections:
+        for connection_str in data_connections:
             try:
                 source_comp, source_port, target_comp, target_port = self._parse_data_connection(connection_str)
                 
@@ -264,12 +316,6 @@ class GraphBuilder:
             except InvalidConnectionError as e:
                 errors.append(str(e))
         
-        # Validate parallelise constraints after processing all edges
-        for src, triggers in control_edge_tracker.items():
-            parallel_targets = triggers.get('parallelise', set())
-            if 'parallelise' in triggers and len(parallel_targets) < 2:
-                errors.append(f"Component '{src}' has <2 targets for parallelise: {list(parallel_targets)}")
-        
         return errors
     
     def _validate_control_edge_constraints(self, source_comp: str, target_comp: str, 
@@ -278,21 +324,26 @@ class GraphBuilder:
         """
         Validate control edge constraints based on trigger type.
         
+        Updated rules:
+        - ok/subjob_ok: Multiple allowed to different targets (implicit parallelization)
+        - error/subjob_error: Only one per component
+        - if: Multiple allowed but unique order numbers per component
+        
         Returns:
             Error message if constraint violated, None if valid
         """
         tracker = control_edge_tracker[source_comp]
         
-        if trigger in ['ok', 'error', 'subjob_ok', 'subjob_error', 'synchronise']:
-            # These triggers can only appear once per component
-            if trigger in tracker:
-                return (f"Component '{source_comp}' already has a '{trigger}' control edge. "
-                       f"Only one '{trigger}' edge allowed per component.")
+        if trigger in ['ok', 'subjob_ok']:
+            # Allow multiple edges to different targets (implicit parallelization)
             tracker[trigger].add(target_comp)
             
-        elif trigger == 'parallelise':
-            # Parallelise can appear multiple times, but we need to track targets
-            # to ensure minimum 2 targets total across all parallelise edges
+        elif trigger in ['error', 'subjob_error']:
+            # Only one error edge per component
+            if trigger in tracker:
+                existing_targets = list(tracker[trigger])
+                return (f"Component '{source_comp}' already has a '{trigger}' control edge to '{existing_targets[0]}'. "
+                       f"Only one '{trigger}' edge allowed per component.")
             tracker[trigger].add(target_comp)
             
         elif trigger == 'if':
