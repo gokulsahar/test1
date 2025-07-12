@@ -1,52 +1,134 @@
 job:
-  name: simple_test_job
-  desc: Simple linear job to test basic build functionality
-  version: 1.0.0
+  name: logging_pipeline_demo
+  desc: Demonstration of two-level execution architecture using logging components
+  version: 1.2.0
   team: data-engineering
-  owner: test@company.com
-  created: "2025-07-09"
+  owner: alice@company.com
+  created: "2025-07-12"
 
 job_config:
-  retries: 1
-  timeout: 600
+  retries: 2
+  timeout: 3600
   fail_strategy: halt
-  dask_config:
-    memory_limit: "1GB"
-    parallelism: 2
-    use_cluster: false
+  
+  # Two-Level Architecture: Job-level resource pools for Level 2 executors
+  execution:
+    # ThreadPool: Shared pool for simple/I-O operations
+    threadpool:
+      max_workers: 8
+    
+    # Dask: Shared cluster for heavy computation
+    dask:
+      enabled: true
+      cluster_workers: 16               # Total cluster size
+      threads_per_worker: 2
+      default_memory_per_worker: "4GB"  # Default allocation
+    
+    # Disk-based: For large lookup tables that exceed RAM
+    disk_based:
+      enabled: true
+      global_temp_dir: "/fast_ssd/datapy_cache"
+      global_max_cache_size: "200GB"    # Total cache budget
+      compression: true
 
 components:
+  # Level 2: Components choose executors based on workload characteristics
   - name: start_job
     type: logging
+    executor: threadpool                # Simple logging
     params:
-      message: "Starting job in {{context.environment}} environment"
+      message: "Starting ETL pipeline in {{context.environment}} environment"
       level: "INFO"
       delay_seconds: 1
 
-  - name: process_data
+  - name: simulate_extraction
     type: logging
+    executor: threadpool                # Simulate data extraction
     params:
-      message: "Processing data - found {row_count} records"
+      message: "Extracting data - found {row_count} records from source"
+      level: "INFO"
+      delay_seconds: 3
+
+  - name: heavy_processing
+    type: logging
+    executor: dask                      # Simulate heavy computation
+    dask_config:
+      workers: 8                       # Allocate 8 of 16 cluster workers
+      memory_per_worker: "6GB"         # Override default 4GB
+    params:
+      message: "Heavy processing with Dask - processing {row_count} records"
+      level: "INFO"
+      delay_seconds: 5
+
+  - name: lookup_simulation
+    type: logging
+    executor: disk_based                # Simulate large lookup
+    disk_config:
+      cache_size: "50GB"               # Use 50GB of 200GB budget
+    params:
+      message: "Performing large lookup operation from disk cache"
       level: "INFO"
       delay_seconds: 2
 
-  - name: finish_job
+  - name: audit_logger
     type: logging
+    executor: threadpool                # Parallel audit logging
     params:
-      message: "Job completed at {timestamp}"
+      message: "Audit log entry - job started at {timestamp}"
       level: "INFO"
+      delay_seconds: 1
 
-  - name: handle_error
+  - name: validation_step
     type: logging
+    executor: threadpool                # Data validation simulation
     params:
-      message: "Error occurred - cleaning up"
-      level: "ERROR"
+      message: "Validating {row_count} records"
+      level: "INFO"
+      delay_seconds: 2
+      fail_condition: "row_count < 0"   # Simulate failure condition
+
+  - name: final_load
+    type: logging
+    executor: dask                      # Simulate final loading
+    dask_config:
+      workers: 4                       # Smaller allocation
+      memory_per_worker: "3GB"
+    params:
+      message: "Loading {row_count} records to warehouse"
+      level: "INFO"
+      delay_seconds: 3
+
+  - name: cleanup_handler
+    type: logging
+    executor: threadpool                # Cleanup operations
+    params:
+      message: "Cleanup completed at {timestamp}"
+      level: "INFO"
+      delay_seconds: 1
 
 connections:
   data:
-    - "start_job.main -> process_data.main"
-    - "process_data.main -> finish_job.main"
+    # Data edges define within-subjob relationships (no control edges between same components)
+    - "start_job.main -> simulate_extraction.main"
+    - "simulate_extraction.main -> heavy_processing.main"
+    - "heavy_processing.main -> lookup_simulation.main"
+    - "lookup_simulation.main -> validation_step.main"
+    - "validation_step.main -> final_load.main"
 
   control:
-    - "start_job (error) handle_error"
-    - "process_data (error) handle_error"
+    # Control edges create subjob boundaries - NO overlap with data edges
+    
+    # Implicit parallelization: start_job triggers audit in parallel
+    - "start_job (ok) audit_logger"             # Subjob 2: Parallel audit (asyncio)
+    
+    # Conditional execution on different component
+    - "heavy_processing (if1): \"row_count > 0\" validation_step"
+    
+    # Error handling with cascade skip
+    - "start_job (error) cleanup_handler"
+    - "heavy_processing (error) cleanup_handler"
+    - "validation_step (error) cleanup_handler"
+    
+    # Cross-subjob synchronization: Both subjobs must complete before cleanup
+    - "final_load (subjob_ok) cleanup_handler"      # Main pipeline completion
+    - "audit_logger (subjob_ok) cleanup_handler"    # Audit completion (both paths to cleanup)

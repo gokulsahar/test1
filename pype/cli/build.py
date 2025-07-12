@@ -132,6 +132,7 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
         raise click.Abort()
 
 
+
 def _create_pjob_file(pjob_file: Path, original_yaml: Path, job_model, plan_result):
     """Create the .pjob ZIP file with all required components."""
     
@@ -143,8 +144,16 @@ def _create_pjob_file(pjob_file: Path, original_yaml: Path, job_model, plan_resu
         # 2. Add original YAML file
         zf.write(original_yaml, ORIGINAL_YAML_FILE)
         
-        # 3. Add serialized DAG
-        dag_data = _serialize_dag(plan_result.dag)
+        # 3. Add serialized DAG using centralized planner method
+        # Note: plan_result should contain a reference to the planner that created it
+        # For now, create minimal planner instance for serialization
+        from pype.core.registry.component_registry import ComponentRegistry
+        from pype.core.planner.planner import JobPlanner
+        
+        # Use a planner instance for consistent serialization
+        registry = ComponentRegistry()
+        planner = JobPlanner(registry)
+        dag_data = planner.serialize_dag_for_pjob(plan_result.dag)
         dag_msgpack = msgpack.packb(dag_data)
         zf.writestr(DAG_FILE, dag_msgpack)
         
@@ -188,23 +197,7 @@ def _create_manifest(job_model, plan_result) -> Dict[str, Any]:
     }
 
 
-def _serialize_dag(dag: nx.DiGraph) -> Dict[str, Any]:
-    """Serialize NetworkX DAG to msgpack-compatible format."""
-    # Convert to node-link format
-    dag_data = nx.node_link_data(dag)
-    
-    # Ensure all data is serializable
-    def make_serializable(obj):
-        if isinstance(obj, set):
-            return list(obj)
-        elif isinstance(obj, (list, tuple)):
-            return [make_serializable(item) for item in obj]
-        elif isinstance(obj, dict):
-            return {k: make_serializable(v) for k, v in obj.items()}
-        else:
-            return obj
-    
-    return make_serializable(dag_data)
+
 
 
 def _show_build_summary(plan_result, verbose_level: int):

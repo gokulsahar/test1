@@ -207,11 +207,6 @@ class PortResolver:
             dag, input_connection_counts, component_matchers
         ))
         
-        # Validate multi-output constraints using cached matchers
-        errors.extend(self._validate_multi_output(
-            dag, output_connection_counts, component_matchers
-        ))
-        
         return errors
     
     def _validate_port(self, component: str, port: str, port_type: str, 
@@ -286,8 +281,6 @@ class PortResolver:
                 )
         
         return errors
-    
- 
     
     # === UTILITIES ===
     

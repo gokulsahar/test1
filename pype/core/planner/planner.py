@@ -1053,7 +1053,7 @@ class JobPlanner:
         Key Operations:
         - Convert to node-link format (msgpack-friendly)
         - Ensure all data is serializable (no complex objects)
-        - Handle special data types (sets, tuples, etc.)
+        - Handle special data types (sets, tuples, Pydantic models)
         
         Args:
             dag: NetworkX DiGraph with full metadata
@@ -1061,8 +1061,8 @@ class JobPlanner:
         Returns:
             Dictionary representation ready for msgpack serialization
         """
-        # Convert to node-link format which is msgpack-friendly
-        dag_data = nx.node_link_data(dag)
+        # Fix NetworkX 3.6 future warning by explicitly setting edges parameter
+        dag_data = nx.node_link_data(dag, edges="links")
         
         # Ensure all data is serializable (no complex objects)
         def make_serializable(obj):
@@ -1072,8 +1072,22 @@ class JobPlanner:
                 return [make_serializable(item) for item in obj]
             elif isinstance(obj, dict):
                 return {k: make_serializable(v) for k, v in obj.items()}
+            elif hasattr(obj, 'model_dump'):  # Pydantic v2 model
+                return make_serializable(obj.model_dump())
+            elif hasattr(obj, 'dict'):  # Pydantic v1 model
+                return make_serializable(obj.dict())
+            elif hasattr(obj, '__dict__'):  # Generic object with attributes
+                return make_serializable(vars(obj))
             else:
-                return obj
+                # Try to convert to basic types
+                try:
+                    # Test if it's already JSON serializable (which msgpack can handle)
+                    import json
+                    json.dumps(obj)
+                    return obj
+                except (TypeError, ValueError):
+                    # Convert to string as fallback
+                    return str(obj)
         
         return make_serializable(dag_data)
 
