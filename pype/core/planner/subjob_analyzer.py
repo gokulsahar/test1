@@ -319,6 +319,19 @@ class SubjobAnalyzer:
         for idx, subjob_id in enumerate(execution_order):
             components = subjob_components[subjob_id]
             
+            # NEW: Topologically sort components within subjob
+            subjob_subgraph = dag.subgraph(components)
+            try:
+                component_execution_order = list(nx.topological_sort(subjob_subgraph))
+            except nx.NetworkXError:
+                # If cycle exists (shouldn't happen), fallback to original order
+                component_execution_order = components
+            
+            # NEW: Identify which components can run in parallel within subjob
+            component_execution_waves = self._identify_component_execution_waves(
+                component_execution_order, subjob_subgraph
+            )
+            
             # Find which execution wave this subjob belongs to
             execution_wave = 0
             for wave_idx, wave in enumerate(execution_waves):
@@ -337,6 +350,8 @@ class SubjobAnalyzer:
             
             subjob_metadata[subjob_id] = {
                 'components': components,
+                'component_execution_order': component_execution_order,  # NEW
+                'component_execution_waves': component_execution_waves,   # NEW
                 'execution_order': idx,
                 'execution_wave': execution_wave,
                 'is_checkpoint_boundary': True,  # All subjob ends are checkpoints
@@ -351,6 +366,39 @@ class SubjobAnalyzer:
             subjob_metadata[subjob_id]['execution_waves'] = execution_waves
         
         return subjob_metadata
+
+    def _identify_component_execution_waves(self, component_order: List[str], 
+                                        subjob_graph: nx.DiGraph) -> List[List[str]]:
+        """
+        Group components into execution waves for parallel execution within subjob.
+        Components in the same wave have no dependencies on each other.
+        """
+        execution_waves = []
+        remaining_components = set(component_order)
+        processed_components = set()
+        
+        while remaining_components:
+            # Find components that have no unprocessed dependencies
+            current_wave = []
+            for component in component_order:
+                if component not in remaining_components:
+                    continue
+                    
+                # Check if all predecessors are already processed
+                predecessors = set(subjob_graph.predecessors(component))
+                if predecessors.issubset(processed_components):
+                    current_wave.append(component)
+            
+            if not current_wave:
+                # This shouldn't happen with valid DAG, but handle gracefully
+                # Just take the first remaining component
+                current_wave = [next(iter(remaining_components))]
+            
+            execution_waves.append(current_wave)
+            processed_components.update(current_wave)
+            remaining_components -= set(current_wave)
+        
+        return execution_waves
     
     def _build_subjob_dependency_graph(self, dag: nx.DiGraph, 
                                       subjob_components: Dict[str, List[str]]) -> nx.DiGraph:
