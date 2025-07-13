@@ -358,6 +358,18 @@ class JobPlanner:
                 )]
             )
     
+    def _find_job_starters(self, dag: nx.DiGraph) -> List[str]:
+        """Find components that can start the job (startable=True + no incoming edges)."""
+        job_starters = []
+        for node, node_data in dag.nodes(data=True):
+            is_registry_startable = node_data.get('startable', False)
+            has_any_incoming_edges = dag.in_degree(node) > 0
+            
+            if is_registry_startable and not has_any_incoming_edges:
+                job_starters.append(node)
+        return job_starters
+    
+    
     def _generate_execution_metadata(self, dag: nx.DiGraph, 
                                    subjob_components: Dict[str, List[str]], 
                                    subjob_metadata: Dict[str, Dict[str, Any]],
@@ -371,6 +383,19 @@ class JobPlanner:
         Returns:
             Essential metadata dictionary for runtime execution
         """
+        # Find job starter components (correct logic: startable=True + no incoming edges)
+        job_starters = self._find_job_starters(dag)
+        
+        # Validate we have at least one job starter
+        if not job_starters:
+            raise CriticalPlanningError(
+                "No job starter components found. At least one component must have startable=True and no incoming edges.",
+                [ValidationError(
+                    code="NO_JOB_STARTERS",
+                    message="No components can start the job execution"
+                )]
+            )
+        
         # Create component dependency cache and port mapping in single pass
         component_dependencies, port_mapping = self._create_dependency_and_port_caches(dag)
         
@@ -397,6 +422,7 @@ class JobPlanner:
         
         return {
             # Essential runtime data
+            'job_starters': job_starters,
             'component_dependencies': component_dependencies,
             'port_mapping': port_mapping,
             'node_metadata': node_metadata,
