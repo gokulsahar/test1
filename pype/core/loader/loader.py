@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import ruamel.yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from pype.core.loader.validator import validate_job_file
 from pype.core.loader.templater import resolve_template_yaml, TemplateError
 from pype.core.utils.constants import DEFAULT_ENCODING
@@ -26,13 +26,18 @@ class ExecutionConfigModel(BaseModel):
 
 
 class JobConfigModel(BaseModel):
-    """Pydantic model for job configuration."""
+    """Pydantic model for job configuration with flexible additional fields."""
+    
+    # Core fields with defaults (all optional)
     retries: int = Field(default=1, ge=0, le=3)
     timeout: int = Field(default=3600, ge=1)
     fail_strategy: str = Field(default="halt")
     execution_mode: str = Field(default="pandas")
     chunk_size: str = Field(default="200MB")
     execution: Optional[ExecutionConfigModel] = None
+
+    # Allow arbitrary additional fields
+    model_config = ConfigDict(extra="allow")
 
     @field_validator('fail_strategy')
     @classmethod

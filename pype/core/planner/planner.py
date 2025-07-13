@@ -490,24 +490,13 @@ class JobPlanner:
         return component_to_subjob
     
     def _extract_job_config_metadata(self, job_model: JobModel) -> Dict[str, Any]:
-        """Extract job configuration metadata for runtime decisions."""
-        # Convert Pydantic ExecutionConfigModel to simple dict
-        execution_config = getattr(job_model.job_config, 'execution', None)
-        execution_dict = None
-        if execution_config is not None:
-            if hasattr(execution_config, 'model_dump'):
-                execution_dict = execution_config.model_dump()
-            elif hasattr(execution_config, 'dict'):
-                execution_dict = execution_config.dict()
-        
-        return {
-            'retries': job_model.job_config.retries,
-            'timeout': job_model.job_config.timeout,
-            'fail_strategy': job_model.job_config.fail_strategy,
-            'execution_mode': job_model.job_config.execution_mode,
-            'chunk_size': job_model.job_config.chunk_size,
-            'execution_config': execution_dict  
-        }
+        """Extract ALL job configuration metadata (core + arbitrary fields)."""
+        if hasattr(job_model.job_config, 'model_dump'):
+            return job_model.job_config.model_dump()
+        elif hasattr(job_model.job_config, 'dict'):
+            return job_model.job_config.dict()
+        else:
+            return job_model.job_config.__dict__
         
     def _create_build_metadata(self, dag: nx.DiGraph, job_model: JobModel) -> Dict[str, Any]:
         """Create build metadata for the plan."""

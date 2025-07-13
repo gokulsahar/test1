@@ -37,7 +37,7 @@
     },
     "job_config": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "retries": {
           "type": "integer",
