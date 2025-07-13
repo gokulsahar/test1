@@ -205,23 +205,35 @@ def _create_manifest_metadata(job_model, plan_result) -> Dict[str, Any]:
     }
 
 
-def _show_build_summary(plan_result, verbose_level: int):
+def _show_build_summary(plan_result, verbose_level: int, show_enhanced: bool = False):
     """Show build summary based on verbosity level."""
     
     if verbose_level >= 2:
-        click.echo("\n=== Build Summary ===")
+        header = "Build Summary" if show_enhanced else "=== Build Summary ==="
+        separator = "=" * 40
+        
+        click.echo(f"\n{header}")
+        click.echo(separator)
         
         # Basic stats
         click.echo(f"Components: {len(plan_result.dag.nodes())}")
         click.echo(f"Connections: {len(plan_result.dag.edges())}")
         click.echo(f"Subjobs: {len(plan_result.subjob_components)}")
         
-        # Subjob breakdown
+        # Subjob breakdown with execution order
         if plan_result.subjob_components:
             click.echo("\nSubjob Structure:")
             for subjob_id in plan_result.subjob_execution_order:
                 components = plan_result.subjob_components[subjob_id]
                 click.echo(f"  {subjob_id}: {len(components)} components")
+        
+        # Dependency tokens summary
+        dependency_tokens = plan_result.execution_metadata.get('dependency_tokens', {})
+        if dependency_tokens:
+            click.echo("\nDependency Tokens:")
+            for subjob_id, tokens in dependency_tokens.items():
+                if tokens:  # Only show subjobs with dependencies
+                    click.echo(f"  {subjob_id}: waits for {len(tokens)} tokens")
         
         # Warnings
         if plan_result.validation_warnings:
@@ -229,7 +241,8 @@ def _show_build_summary(plan_result, verbose_level: int):
             for warning in plan_result.validation_warnings[:5]:  # Show first 5
                 click.echo(f"   {warning.message}")
             if len(plan_result.validation_warnings) > 5:
-                click.echo(f"  ... and {len(plan_result.validation_warnings) - 5} more")
+                remaining = len(plan_result.validation_warnings) - 5
+                click.echo(f"  ... and {remaining} more")
     
     if verbose_level >= 3:
         click.echo("\n=== Job Execution Details ===")
@@ -238,7 +251,7 @@ def _show_build_summary(plan_result, verbose_level: int):
         job_starters = plan_result.execution_metadata.get("job_starters", [])
         click.echo(f"Job starters: {', '.join(job_starters)}")
         
-        # Execution estimates
+        # Execution estimates (if available)
         exec_meta = plan_result.execution_metadata
         estimated_time = exec_meta.get("estimated_execution_time", 0)
         if estimated_time > 0:

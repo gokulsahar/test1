@@ -348,8 +348,8 @@ class SubjobAnalyzer:
         return errors
     
     def _generate_subjob_metadata(self, dag: nx.DiGraph, 
-                                 subjob_components: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
-        """Generate metadata for each subjob with execution waves."""
+                             subjob_components: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+        """Generate metadata for each subjob without execution waves."""
         subjob_metadata = {}
         
         # Build subjob dependency graph for execution planning
@@ -362,32 +362,17 @@ class SubjobAnalyzer:
             # Cycle detected - this should have been caught in validation
             execution_order = sorted(subjob_components.keys())
         
-        # Identify execution waves for asyncio parallelism
-        execution_waves = self._identify_execution_waves(execution_order, subjob_deps)
-        
         # Generate metadata for each subjob
         for idx, subjob_id in enumerate(execution_order):
             components = subjob_components[subjob_id]
             
-            # NEW: Topologically sort components within subjob
+            # Topologically sort components within subjob
             subjob_subgraph = dag.subgraph(components)
             try:
                 component_execution_order = list(nx.topological_sort(subjob_subgraph))
             except nx.NetworkXError:
                 # If cycle exists (shouldn't happen), fallback to original order
                 component_execution_order = components
-            
-            # NEW: Identify which components can run in parallel within subjob
-            component_execution_waves = self._identify_component_execution_waves(
-                component_execution_order, subjob_subgraph
-            )
-            
-            # Find which execution wave this subjob belongs to
-            execution_wave = 0
-            for wave_idx, wave in enumerate(execution_waves):
-                if subjob_id in wave:
-                    execution_wave = wave_idx
-                    break
             
             # Get subjob start components
             subjob_start_components = self._subjob_start_components.get(subjob_id, [])
@@ -400,10 +385,8 @@ class SubjobAnalyzer:
             
             subjob_metadata[subjob_id] = {
                 'components': components,
-                'component_execution_order': component_execution_order,  # NEW
-                'component_execution_waves': component_execution_waves,   # NEW
+                'component_execution_order': component_execution_order,
                 'execution_order': idx,
-                'execution_wave': execution_wave,
                 'is_checkpoint_boundary': True,  # All subjob ends are checkpoints
                 'resume_point': True,
                 'dependencies': sorted(list(subjob_deps.predecessors(subjob_id))),
@@ -411,44 +394,8 @@ class SubjobAnalyzer:
                 'subjob_start_components': sorted(subjob_start_components)
             }
         
-        # Add execution waves to metadata
-        for subjob_id in subjob_metadata:
-            subjob_metadata[subjob_id]['execution_waves'] = execution_waves
-        
         return subjob_metadata
 
-    def _identify_component_execution_waves(self, component_order: List[str], 
-                                        subjob_graph: nx.DiGraph) -> List[List[str]]:
-        """
-        Group components into execution waves for parallel execution within subjob.
-        Components in the same wave have no dependencies on each other.
-        """
-        execution_waves = []
-        remaining_components = set(component_order)
-        processed_components = set()
-        
-        while remaining_components:
-            # Find components that have no unprocessed dependencies
-            current_wave = []
-            for component in component_order:
-                if component not in remaining_components:
-                    continue
-                    
-                # Check if all predecessors are already processed
-                predecessors = set(subjob_graph.predecessors(component))
-                if predecessors.issubset(processed_components):
-                    current_wave.append(component)
-            
-            if not current_wave:
-                # This shouldn't happen with valid DAG, but handle gracefully
-                # Just take the first remaining component
-                current_wave = [next(iter(remaining_components))]
-            
-            execution_waves.append(current_wave)
-            processed_components.update(current_wave)
-            remaining_components -= set(current_wave)
-        
-        return execution_waves
     
     def _build_subjob_dependency_graph(self, dag: nx.DiGraph, 
                                       subjob_components: Dict[str, List[str]]) -> nx.DiGraph:
@@ -477,29 +424,3 @@ class SubjobAnalyzer:
         
         return subjob_graph
     
-    def _identify_execution_waves(self, execution_order: List[str], 
-                                 subjob_deps: nx.DiGraph) -> List[List[str]]:
-        """Group subjobs into execution waves for asyncio parallelism."""
-        execution_waves = []
-        remaining_subjobs = set(execution_order)
-        
-        while remaining_subjobs:
-            # Find subjobs that have no unprocessed dependencies
-            current_wave = []
-            for subjob in execution_order:
-                if subjob not in remaining_subjobs:
-                    continue
-                    
-                # Check if all dependencies are already processed
-                dependencies = set(subjob_deps.predecessors(subjob))
-                if dependencies.issubset(set(execution_order) - remaining_subjobs):
-                    current_wave.append(subjob)
-            
-            if not current_wave:
-                # This shouldn't happen with valid DAG, but handle gracefully
-                current_wave = [list(remaining_subjobs)[0]]
-            
-            execution_waves.append(sorted(current_wave))
-            remaining_subjobs -= set(current_wave)
-        
-        return execution_waves

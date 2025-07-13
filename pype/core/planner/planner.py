@@ -407,9 +407,9 @@ class JobPlanner:
     
     
     def _generate_execution_metadata(self, dag: nx.DiGraph, 
-                                   subjob_components: Dict[str, List[str]], 
-                                   subjob_metadata: Dict[str, Dict[str, Any]],
-                                   job_model: JobModel) -> Dict[str, Any]:
+                               subjob_components: Dict[str, List[str]], 
+                               subjob_metadata: Dict[str, Dict[str, Any]],
+                               job_model: JobModel) -> Dict[str, Any]:
         """
         Generate essential execution metadata for runtime optimization.
         
@@ -438,6 +438,9 @@ class JobPlanner:
         # Create component-to-subjob lookup for O(1) access
         component_to_subjob = self._create_component_subjob_lookup(subjob_components)
         
+        # Generate dependency tokens for event-driven scheduler
+        dependency_tokens = self._generate_dependency_tokens(dag, subjob_components, component_to_subjob)
+        
         # Extract all node metadata for engine
         node_metadata = {}
         for node, data in dag.nodes(data=True):
@@ -451,7 +454,7 @@ class JobPlanner:
                 'input_ports': data.get('input_ports', []),
                 'output_ports': data.get('output_ports', []),
                 'dependencies': data.get('dependencies', []),
-                'iterator_boundary': data.get('iterator_boundary', ''),
+                'forEach_boundary': data.get('forEach_boundary', ''),
                 'is_subjob_start': data.get('is_subjob_start', False),
                 'subjob_id': component_to_subjob.get(node, 'main')
             }
@@ -463,10 +466,88 @@ class JobPlanner:
             'port_mapping': port_mapping,
             'node_metadata': node_metadata,
             'subjob_boundaries': subjob_metadata,
+            'dependency_tokens': dependency_tokens,  # NEW: Token-based dependencies
             
             # Job configuration for runtime
             'job_config': self._extract_job_config_metadata(job_model)
         }
+        
+        
+    def _generate_dependency_tokens(self, dag: nx.DiGraph, 
+                                subjob_components: Dict[str, List[str]],
+                                component_to_subjob: Dict[str, str]) -> Dict[str, Set[str]]:
+        """
+        Generate dependency tokens for event-driven scheduler.
+        
+        For each edge:
+        - ok/error/if → token = <srcCompID>  
+        - subjob_ok → token = SUBJOB_OK::<srcSubJobID>
+        - subjob_error → token = SUBJOB_ERR::<srcSubJobID>
+        
+        Args:
+            dag: NetworkX DiGraph with components and edges
+            subjob_components: Mapping of subjob IDs to component lists
+            component_to_subjob: Mapping of component names to subjob IDs
+            
+        Returns:
+            Dictionary mapping subjob_id to set of dependency tokens it waits for
+        """
+        # Initialize waiting tokens for each subjob
+        subjob_waiting_tokens = {subjob_id: set() for subjob_id in subjob_components.keys()}
+        
+        # Process all control edges to generate tokens
+        for source, target, edge_data in dag.edges(data=True):
+            if edge_data.get('edge_type') != 'control':
+                continue
+                
+            source_subjob = component_to_subjob.get(source)
+            target_subjob = component_to_subjob.get(target)
+            
+            # Skip if within same subjob (handled by component execution order)
+            if source_subjob == target_subjob:
+                continue
+                
+            trigger = edge_data.get('trigger', 'unknown')
+            
+            # Generate appropriate token based on trigger type
+            if trigger in ['ok', 'error', 'if']:
+                # Component-level trigger: token = source component ID
+                token = source
+            elif trigger == 'subjob_ok':
+                # Subjob completion trigger: token = SUBJOB_OK::<subjob_id>
+                token = f"SUBJOB_OK::{source_subjob}"
+            elif trigger == 'subjob_error':
+                # Subjob error trigger: token = SUBJOB_ERR::<subjob_id>
+                token = f"SUBJOB_ERR::{source_subjob}"
+            else:
+                # Unknown trigger type - should have been caught in validation
+                continue
+            
+            # Add token to target subjob's waiting list
+            if target_subjob:
+                subjob_waiting_tokens[target_subjob].add(token)
+        
+        # Process data edges to add data dependency tokens
+        for source, target, edge_data in dag.edges(data=True):
+            if edge_data.get('edge_type') != 'data':
+                continue
+                
+            source_subjob = component_to_subjob.get(source)
+            target_subjob = component_to_subjob.get(target)
+            
+            # Data edges should not cross subjob boundaries (validation should catch this)
+            if source_subjob != target_subjob:
+                continue
+                
+            # Data dependencies within subjobs are handled by component execution order
+            # No tokens needed for intra-subjob data flow
+        
+        # Convert sets to sorted lists for deterministic serialization
+        return {
+            subjob_id: sorted(list(tokens)) 
+            for subjob_id, tokens in subjob_waiting_tokens.items()
+        }    
+        
     
     def _create_dependency_and_port_caches(self, dag: nx.DiGraph) -> Tuple[Dict[str, Dict[str, List[str]]], Dict[str, Dict[str, List[Tuple[str, str]]]]]:
         """
@@ -549,17 +630,17 @@ class JobPlanner:
         }
     
     def _build_plan_result(self, dag: nx.DiGraph, 
-                          subjob_components: Dict[str, List[str]], 
-                          subjob_metadata: Dict[str, Dict[str, Any]],
-                          execution_metadata: Dict[str, Any],
-                          all_errors: List[ValidationError], 
-                          all_warnings: List[ValidationWarning],
-                          build_metadata: Dict[str, Any]) -> PlanResult:
+                        subjob_components: Dict[str, List[str]], 
+                        subjob_metadata: Dict[str, Dict[str, Any]],
+                        execution_metadata: Dict[str, Any],
+                        all_errors: List[ValidationError], 
+                        all_warnings: List[ValidationWarning],
+                        build_metadata: Dict[str, Any]) -> PlanResult:
         """Construct final PlanResult."""
         # Extract execution order from subjob metadata
         subjob_execution_order = []
         for subjob_id in sorted(subjob_metadata.keys(), 
-                               key=lambda x: subjob_metadata[x].get('execution_order', 0)):
+                            key=lambda x: subjob_metadata[x].get('execution_order', 0)):
             subjob_execution_order.append(subjob_id)
         
         return PlanResult(
@@ -571,7 +652,7 @@ class JobPlanner:
             execution_metadata=execution_metadata,
             build_metadata=build_metadata
         )
-    
+        
     def serialize_dag_for_pjob(self, dag: nx.DiGraph) -> Dict[str, Any]:
         """
         Convert NetworkX DAG to msgpack-compatible format for .pjob file.

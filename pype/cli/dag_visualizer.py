@@ -418,3 +418,8 @@ def _show_dag_quick_summary(dag_data: Dict[str, Any], subjob_data: Dict[str, Any
         click.echo(f"Subjobs: {len(components)}")
         execution_order = subjob_data.get('execution_order', [])
         click.echo(f"Execution Order: {' → '.join(execution_order)}")
+        
+        # Show dependency tokens if available
+        dependency_tokens = subjob_data.get('dependency_tokens', {})
+        if dependency_tokens:
+            click.echo(f"Dependency Tokens: {sum(len(tokens) for tokens in dependency_tokens.values())} total")
