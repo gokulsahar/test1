@@ -292,6 +292,27 @@ class SubjobAnalyzer:
         if unassigned:
             errors.append(f"Components not assigned to any subjob: {sorted(unassigned)}")
         
+        # Validate that components with ONLY incoming control edges have startable=True
+        for node in dag.nodes():
+            has_incoming_control = any(
+                edge_data.get('edge_type') == 'control'
+                for _, _, edge_data in dag.in_edges(node, data=True)
+            )
+            
+            has_incoming_data = any(
+                edge_data.get('edge_type') == 'data'
+                for _, _, edge_data in dag.in_edges(node, data=True)
+            )
+            
+            is_startable = dag.nodes[node].get('startable', False)
+            
+            # Only validate components that have control edges BUT NO data edges
+            if has_incoming_control and not has_incoming_data and not is_startable:
+                errors.append(
+                    f"Component '{node}' has only incoming control edges but startable=False. "
+                    f"Components that start subjobs via control edges must have startable=True."
+                )
+        
         # Validate no data edges cross subjob boundaries
         for source, target, edge_data in sorted(dag.edges(data=True), key=lambda e: (e[0], e[1])):
             if edge_data.get('edge_type') == 'data':
