@@ -1,6 +1,7 @@
 import networkx as nx
 from typing import Dict, List, Tuple, Any, Set, Optional
 from collections import defaultdict, deque
+from pype.core.utils.constants import FOREACH_COMPONENT_TYPE
 
 
 class SubjobAnalysisError(Exception):
@@ -79,8 +80,8 @@ class SubjobAnalyzer:
     
     def _detect_subjob_boundaries(self, dag: nx.DiGraph) -> Dict[str, str]:
         """
-        Detect subjob boundaries using simple rule: Control edges create boundaries.
-        Components connected only by data edges belong to same subjob.
+        Detect subjob boundaries using forEach dominance rule: 
+        Control edges create boundaries, but forEach components force all downstream into same subjob.
         """
         component_to_subjob = {}
         subjob_counter = 0
@@ -89,13 +90,18 @@ class SubjobAnalyzer:
         # Find all components
         all_components = set(dag.nodes())
         
+        # Find forEach components for dominance handling
+        forEach_components = self._find_forEach_components(dag)
+        
         # Process each unvisited component
         for component in sorted(all_components):
             if component in visited:
                 continue
                 
             # Find all components connected only by data edges (same subjob)
-            subjob_components = self._find_data_connected_group(dag, component, visited)
+            subjob_components = self._find_data_connected_group_with_forEach_dominance(
+                dag, component, visited, forEach_components
+            )
             
             # Assign subjob ID
             subjob_id = f"subjob_{subjob_counter}"
@@ -113,9 +119,25 @@ class SubjobAnalyzer:
         
         return component_to_subjob
     
-    def _find_data_connected_group(self, dag: nx.DiGraph, start_component: str, 
-                                   global_visited: Set[str]) -> Set[str]:
-        """Find all components connected to start_component only by data edges."""
+    
+    def _find_forEach_components(self, dag: nx.DiGraph) -> Set[str]:
+        """Find all forEach components in the DAG."""
+        return {
+            node for node, data in dag.nodes(data=True)
+            if data.get('component_type') == FOREACH_COMPONENT_TYPE
+        }
+    
+    def _find_data_connected_group_with_forEach_dominance(
+    self, 
+    dag: nx.DiGraph, 
+    start_component: str, 
+    global_visited: Set[str],
+    forEach_components: Set[str]
+) -> Set[str]:
+        """
+        Find all components connected to start_component considering forEach dominance.
+        forEach components force all downstream components into same subjob.
+        """
         group = set()
         queue = deque([start_component])
         local_visited = set()
@@ -129,7 +151,7 @@ class SubjobAnalyzer:
             local_visited.add(current)
             group.add(current)
             
-            # Follow data edges only (both directions)
+            # Follow data edges (both directions) - standard behavior
             for source, target, edge_data in dag.edges(current, data=True):
                 if edge_data.get('edge_type') == 'data' and target not in local_visited:
                     queue.append(target)
@@ -137,6 +159,13 @@ class SubjobAnalyzer:
             for source, target, edge_data in dag.in_edges(current, data=True):
                 if edge_data.get('edge_type') == 'data' and source not in local_visited:
                     queue.append(source)
+            
+            # NEW: forEach dominance - if current is forEach, include ALL downstream components
+            if current in forEach_components:
+                downstream_components = nx.descendants(dag, current)
+                for downstream in downstream_components:
+                    if downstream not in local_visited:
+                        queue.append(downstream)
         
         return group
     

@@ -60,7 +60,7 @@ class StructureValidator:
     
     def validate_structure(self, dag: nx.DiGraph) -> Tuple[List[ValidationError], List[ValidationWarning]]:
         """
-        Perform comprehensive structural validation of DAG.
+        Perform basic structural validation of DAG (cycles, isolation, reachability).
         
         Args:
             dag: NetworkX DiGraph to validate
@@ -84,15 +84,9 @@ class StructureValidator:
             # Check for isolated components
             isolated_errors = self._validate_no_isolated_components(dag)
             errors.extend(isolated_errors)
-
-            
-            # Mark iterator boundaries and collect errors
-            iterator_errors = self._mark_iterator_boundaries(dag)
-            errors.extend(iterator_errors)
             
             # Non-critical validations
             errors.extend(self._validate_global_references(dag))
-            errors.extend(self._validate_iterator_components(dag))
             
             # Basic performance warnings
             warnings.extend(self._validate_performance_characteristics(dag))
@@ -212,128 +206,6 @@ class StructureValidator:
         
         return errors
     
-    def _mark_iterator_boundaries(self, dag: nx.DiGraph) -> List[ValidationError]:
-        """Mark components with their iterator boundary using recursive algorithm."""
-        # Initialize all components with empty iterator boundary
-        for node in dag.nodes():
-            dag.nodes[node]['iterator_boundary'] = ""
-        
-        # Find all iterator components
-        iterator_components = [
-            node for node, data in dag.nodes(data=True)
-            if data.get('component_type') == 'iterator'
-        ]
-            
-        errors: List[ValidationError] = []
-        # Process each iterator recursively
-        for iterator_comp in iterator_components:
-            errors.extend(
-                self._mark_iterator_boundary_recursive(
-                    dag, iterator_comp, iterator_comp
-                )
-            )
-        return errors
-    
-    def _mark_iterator_boundary_recursive(self, dag: nx.DiGraph, iterator_comp: str, boundary_name: str) -> List[ValidationError]:
-        """Recursively mark iterator boundary starting from iterator's data outputs."""
-        errors: List[ValidationError] = []
-        # Gather all data outputs of this iterator
-        data_outputs = [
-            target
-            for _, target, edge_data in dag.out_edges(iterator_comp, data=True)
-            if edge_data.get('edge_type') == 'data'
-        ]
-        
-        # Traverse from each data output under the given boundary
-        for start in data_outputs:
-            errors.extend(
-                self._traverse_iterator_boundary(
-                    dag, start, boundary_name, set()  # fresh visited per branch
-                )
-            )
-        return errors
-
-    def _traverse_iterator_boundary(
-        self,
-        dag: nx.DiGraph,
-        current_comp: str,
-        boundary_name: str,
-        visited: Set[str]
-    ) -> List[ValidationError]:
-        """Traverse downstream from component, marking iterator boundary."""
-        errors = []
-        
-        # Avoid cycles
-        if current_comp in visited:
-            return errors
-        visited.add(current_comp)
-
-        # Check for conflicting boundary
-        existing = dag.nodes[current_comp].get('iterator_boundary', "")
-        if existing and existing != boundary_name:
-            errors.append(ValidationError(
-                code="CONFLICTING_ITERATOR_BOUNDARY",
-                message=f"Component '{current_comp}' assigned to multiple iterator boundaries: '{existing}' and '{boundary_name}'",
-                component=current_comp
-            ))
-            return errors  # Don't continue traversal with conflicting boundary
-
-        # Nested iterator case
-        if dag.nodes[current_comp].get('component_type') == 'iterator':
-            # Tag this iterator under the outer boundary
-            dag.nodes[current_comp]['iterator_boundary'] = boundary_name
-
-            # Rescue edges off this iterator still belong to the outer boundary
-            for _, rescue_target, rescue_data in dag.out_edges(current_comp, data=True):
-                trig = rescue_data.get('trigger', "")
-                if rescue_data.get('edge_type') == 'control' and \
-                trig in ('ok', 'error', 'subjob_ok', 'subjob_error'):
-                    rescue_errors = self._traverse_iterator_boundary(
-                        dag,
-                        rescue_target,
-                        boundary_name,
-                        visited
-                    )
-                    errors.extend(rescue_errors)
-
-            # Now start the inner boundary for this iterator
-            inner_errors = self._mark_iterator_boundary_recursive(
-                dag,
-                current_comp,
-                current_comp
-            )
-            errors.extend(inner_errors)
-            return errors
-
-        # Normal component: tag under current boundary
-        dag.nodes[current_comp]['iterator_boundary'] = boundary_name
-
-        # Recurse on outgoing edges
-        is_iterator = dag.nodes[current_comp].get('component_type') == 'iterator'
-        is_subjob_start = dag.nodes[current_comp].get('is_subjob_start', False)
-
-        for _, target, edge_data in dag.out_edges(current_comp, data=True):
-            etype = edge_data.get('edge_type')
-            trigger = edge_data.get('trigger', "")
-
-            # Skip ok/error only if we're on an iterator node
-            if etype == 'control' and trigger in ('ok', 'error') and is_iterator:
-                continue
-
-            # Skip subjob_ok/error only if we're on the subjob's first component
-            if etype == 'control' and trigger in ('subjob_ok', 'subjob_error') and is_subjob_start:
-                continue
-
-            # Otherwise keep going under the same boundary
-            traverse_errors = self._traverse_iterator_boundary(
-                dag,
-                target,
-                boundary_name,
-                visited
-            )
-            errors.extend(traverse_errors)
-        
-        return errors
     
     def _validate_global_references(self, dag: nx.DiGraph) -> List[ValidationError]:
         """Validate global variable references in component configurations."""
@@ -381,43 +253,6 @@ class StructureValidator:
         
         return refs
     
-    def _validate_iterator_components(self, dag: nx.DiGraph) -> List[ValidationError]:
-        """Validate iterator component structure and configuration."""
-        errors = []
-        
-        iterator_components = [
-            node for node, data in dag.nodes(data=True)
-            if data.get('component_type') == 'iterator'
-        ]
-        
-        for iterator_comp in iterator_components:
-            # Validate iterator has data input
-            has_data_input = any(
-                edge_data.get('edge_type') == 'data'
-                for _, _, edge_data in dag.in_edges(iterator_comp, data=True)
-            )
-            
-            if not has_data_input:
-                errors.append(ValidationError(
-                    code="INVALID_ITERATOR_STRUCTURE",
-                    message=f"Iterator component '{iterator_comp}' must have at least one data input",
-                    component=iterator_comp
-                ))
-            
-            # Validate iterator has data output
-            has_data_output = any(
-                edge_data.get('edge_type') == 'data'
-                for _, _, edge_data in dag.out_edges(iterator_comp, data=True)
-            )
-            
-            if not has_data_output:
-                errors.append(ValidationError(
-                    code="INVALID_ITERATOR_STRUCTURE",
-                    message=f"Iterator component '{iterator_comp}' must have at least one data output",
-                    component=iterator_comp
-                ))
-        
-        return errors
     
     def _validate_performance_characteristics(self, dag: nx.DiGraph) -> List[ValidationWarning]:
         """Generate basic performance warnings for DAG characteristics."""
@@ -439,7 +274,7 @@ class StructureValidator:
                     code="HIGH_FAN_OUT",
                     message=f"Component '{node}' has {out_degree} output connections (>{self.HIGH_FAN_OUT_THRESHOLD}), may impact performance",
                     component=node,
-                    recommendation="Consider using iterator pattern or reducing fan-out"
+                    recommendation="Consider using forEach pattern or reducing fan-out"
                 ))
         
         # Check path depth - only if DAG is acyclic

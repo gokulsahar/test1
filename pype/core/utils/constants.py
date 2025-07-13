@@ -38,6 +38,8 @@ SECRET_VAR_PATTERN = r'\{\{\s*secret\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
 GLOBAL_VAR_PATTERN = rf'\{{\{{\s*([a-zA-Z_][a-zA-Z0-9_]*){GLOBAL_VAR_DELIMITER}([a-zA-Z_][a-zA-Z0-9_]*)\s*\}}\}}'
 
 
+# forEach Component Constants
+FOREACH_COMPONENT_TYPE = "forEach"
 
 
 JOBLET_ROOT = Path(__file__).resolve().parents[3] / "joblets"

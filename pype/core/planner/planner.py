@@ -21,6 +21,7 @@ from pype.core.registry.component_registry import ComponentRegistry
 from pype.core.planner.graph_builder import GraphBuilder, GraphBuildError
 from pype.core.planner.port_resolver import PortResolver, PortResolutionError
 from pype.core.planner.subjob_analyzer import SubjobAnalyzer, SubjobAnalysisError
+from pype.core.planner.iterator_validator import ForEachValidator
 from pype.core.planner.structure_validator import (
     StructureValidator, 
     ValidationError, 
@@ -190,18 +191,22 @@ class JobPlanner:
         # Phase 1: Graph Building
         dag = self._phase_1_graph_building(job_model)
         
-        # Phase 2: Port Resolution
-        dag = self._phase_2_port_resolution(dag)
+        # Phase 2: Structure Validation (cycles, basic structure)
+        structure_errors, structure_warnings = self._phase_2_structure_validation(dag)
+        all_errors.extend(structure_errors)
+        all_warnings.extend(structure_warnings)
         
-        # Phase 3: Subjob Analysis
-        subjob_components, subjob_metadata = self._phase_3_subjob_analysis(dag)
+        # Phase 3: Port Resolution
+        dag = self._phase_3_port_resolution(dag)
         
-        # Phase 4: Structure Validation
-        errors, warnings = self._phase_4_structure_validation(dag, subjob_components)
-        all_errors.extend(errors)
-        all_warnings.extend(warnings)
+        # Phase 4: Iterator Validation
+        dag = self._phase_4_iterator_validation(dag)
+        
+        # Phase 5: Subjob Analysis
+        subjob_components, subjob_metadata = self._phase_5_subjob_analysis(dag)
         
         return dag, subjob_components, subjob_metadata, all_errors, all_warnings
+
     
     def _phase_1_graph_building(self, job_model: JobModel) -> nx.DiGraph:
         """
@@ -235,11 +240,9 @@ class JobPlanner:
                 )]
             )
     
-    def _phase_2_port_resolution(self, dag: nx.DiGraph) -> nx.DiGraph:
+    def _phase_3_port_resolution(self, dag: nx.DiGraph) -> nx.DiGraph:
         """
-        Phase 2: Resolve wildcard ports and validate connectivity.
-        
-        This phase expands wildcard port patterns and validates port connectivity.
+        Phase 3: Resolve wildcard ports and validate connectivity.
         
         Args:
             dag: DAG from Phase 1 with basic structure
@@ -276,15 +279,48 @@ class JobPlanner:
                 )]
             )
     
-    def _phase_3_subjob_analysis(self, dag: nx.DiGraph) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
+    
+    
+    def _phase_4_iterator_validation(self, dag: nx.DiGraph) -> nx.DiGraph:
         """
-        Phase 3: Analyze subjob structure for execution planning.
-        
-        This phase detects subjob boundaries using control edges and generates
-        metadata for parallel execution and checkpointing.
+        Phase 4: Iterator boundary marking and forEach validation.
+        """
+        try:
+            iterator_validator = ForEachValidator()
+            
+            errors = iterator_validator.analyze_forEach_boundaries(dag)
+            
+            if errors:
+                # Iterator validation errors are critical
+                raise PlanningPhaseError(
+                    "Iterator Validation",
+                    f"Found {len(errors)} forEach validation errors",
+                    [ValidationError(
+                        code="FOREACH_VALIDATION_ERROR",
+                        message=error
+                    ) for error in errors]
+                )
+            
+            return dag
+            
+        except Exception as e:
+            raise PlanningPhaseError(
+                "Iterator Validation",
+                str(e),
+                [ValidationError(
+                    code="FOREACH_VALIDATION_ERROR",
+                    message=str(e)
+                )]
+            )
+    
+    
+    
+    def _phase_5_subjob_analysis(self, dag: nx.DiGraph) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
+        """
+        Phase 5: Analyze subjob structure for execution planning.
         
         Args:
-            dag: Resolved DAG from Phase 2 with concrete ports
+            dag: Resolved DAG from previous phases with forEach boundaries marked
             
         Returns:
             Tuple of (subjob_components, subjob_metadata)
@@ -318,9 +354,9 @@ class JobPlanner:
                 )]
             )
     
-    def _phase_4_structure_validation(self, dag: nx.DiGraph, subjob_components: Dict[str, List[str]]) -> Tuple[List[ValidationError], List[ValidationWarning]]:
+    def _phase_2_structure_validation(self, dag: nx.DiGraph, subjob_components: Dict[str, List[str]]) -> Tuple[List[ValidationError], List[ValidationWarning]]:
         """
-        Phase 4: Comprehensive structure validation.
+        Phase 2: Comprehensive structure validation.
         
         This phase performs final validation of the complete DAG structure,
         checking for cycles, unreachable components, and invalid references.
