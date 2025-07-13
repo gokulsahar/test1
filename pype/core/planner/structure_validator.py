@@ -91,7 +91,7 @@ class StructureValidator:
             errors.extend(self._validate_global_references(dag))
             errors.extend(self._validate_iterator_components(dag))
             
-            # Performance warnings
+            # Basic performance warnings
             warnings.extend(self._validate_performance_characteristics(dag))
             
         except (CycleDetectedError, UnreachableComponentError) as e:
@@ -152,7 +152,7 @@ class StructureValidator:
         if not startable_components:
             errors.append(ValidationError(
                 code="NO_STARTABLE_COMPONENTS",
-                message="No components can start execution (must have startable=True and no incoming control edges)"
+                message="No components can start execution (must have startable=True and no incoming edges)"
             ))
             return errors  # Can't analyze reachability without startable components
         
@@ -180,13 +180,13 @@ class StructureValidator:
         startable_components = []
 
         for node, node_data in dag.nodes(data=True):
-            #  1. Check registry metadata for startable flag
+            # Check registry metadata for startable flag
             is_registry_startable = node_data.get('startable', False)
 
-            #  2. Check if the node has no incoming edges at all
+            # Check if the node has no incoming edges at all
             has_any_incoming_edges = dag.in_degree(node) > 0
 
-            #  3. Add to result only if it's marked startable and has no dependencies
+            # Add to result only if it's marked startable and has no dependencies
             if is_registry_startable and not has_any_incoming_edges:
                 startable_components.append(node)
 
@@ -246,7 +246,6 @@ class StructureValidator:
             )
         return errors
 
-
     def _traverse_iterator_boundary(
         self,
         dag: nx.DiGraph,
@@ -257,12 +256,12 @@ class StructureValidator:
         """Traverse downstream from component, marking iterator boundary."""
         errors = []
         
-        # 1) Avoid cycles
+        # Avoid cycles
         if current_comp in visited:
             return errors
         visited.add(current_comp)
 
-        # 2) Check for conflicting boundary
+        # Check for conflicting boundary
         existing = dag.nodes[current_comp].get('iterator_boundary', "")
         if existing and existing != boundary_name:
             errors.append(ValidationError(
@@ -272,12 +271,12 @@ class StructureValidator:
             ))
             return errors  # Don't continue traversal with conflicting boundary
 
-        # 3) Nested iterator case
+        # Nested iterator case
         if dag.nodes[current_comp].get('component_type') == 'iterator':
-            # a) Tag this iterator under the *outer* boundary
+            # Tag this iterator under the outer boundary
             dag.nodes[current_comp]['iterator_boundary'] = boundary_name
 
-            # b) Rescue edges off *this* iterator still belong to the outer boundary
+            # Rescue edges off this iterator still belong to the outer boundary
             for _, rescue_target, rescue_data in dag.out_edges(current_comp, data=True):
                 trig = rescue_data.get('trigger', "")
                 if rescue_data.get('edge_type') == 'control' and \
@@ -290,7 +289,7 @@ class StructureValidator:
                     )
                     errors.extend(rescue_errors)
 
-            # c) Now start the *inner* boundary for this iterator
+            # Now start the inner boundary for this iterator
             inner_errors = self._mark_iterator_boundary_recursive(
                 dag,
                 current_comp,
@@ -299,26 +298,26 @@ class StructureValidator:
             errors.extend(inner_errors)
             return errors
 
-        # 4) Normal component: tag under current boundary
+        # Normal component: tag under current boundary
         dag.nodes[current_comp]['iterator_boundary'] = boundary_name
 
-        # 5) Recurse on outgoing edges
-        is_iterator     = dag.nodes[current_comp].get('component_type') == 'iterator'
+        # Recurse on outgoing edges
+        is_iterator = dag.nodes[current_comp].get('component_type') == 'iterator'
         is_subjob_start = dag.nodes[current_comp].get('is_subjob_start', False)
 
         for _, target, edge_data in dag.out_edges(current_comp, data=True):
-            etype   = edge_data.get('edge_type')
+            etype = edge_data.get('edge_type')
             trigger = edge_data.get('trigger', "")
 
-            # skip ok/error only if we're on an iterator node
+            # Skip ok/error only if we're on an iterator node
             if etype == 'control' and trigger in ('ok', 'error') and is_iterator:
                 continue
 
-            # skip subjob_ok/error only if we're on the subjobs first component
+            # Skip subjob_ok/error only if we're on the subjob's first component
             if etype == 'control' and trigger in ('subjob_ok', 'subjob_error') and is_subjob_start:
                 continue
 
-            # otherwise keep going under the same boundary
+            # Otherwise keep going under the same boundary
             traverse_errors = self._traverse_iterator_boundary(
                 dag,
                 target,
@@ -357,7 +356,7 @@ class StructureValidator:
                         ))
         
         return errors
-    #similar to context substitution in loader/templater.py
+
     def _extract_global_references_recursive(self, obj: Any, refs: List[Tuple[str, str]] = None) -> List[Tuple[str, str]]:
         """Recursively extract global variable references from nested structures."""
         if refs is None:
@@ -414,7 +413,7 @@ class StructureValidator:
         return errors
     
     def _validate_performance_characteristics(self, dag: nx.DiGraph) -> List[ValidationWarning]:
-        """Validate DAG performance characteristics and generate warnings."""
+        """Generate basic performance warnings for DAG characteristics."""
         warnings = []
         
         # Check DAG complexity

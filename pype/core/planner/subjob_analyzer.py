@@ -24,7 +24,7 @@ class InvalidSubjobControlEdgeError(SubjobAnalysisError):
 
 
 class SubjobAnalyzer:
-    """Analyzes DAG to detect subjob boundaries using simplified implicit parallelization model."""
+    """Analyzes DAG to detect subjob boundaries"""
     
     def __init__(self):
         """Initialize subjob analyzer."""
@@ -100,6 +100,12 @@ class SubjobAnalyzer:
             # Assign subjob ID
             subjob_id = f"subjob_{subjob_counter}"
             for comp in subjob_components:
+                # Check for overlap (should never happen but validate)
+                if comp in component_to_subjob:
+                    raise SubjobAnalysisError(
+                        f"Component '{comp}' assigned to multiple subjobs: "
+                        f"'{component_to_subjob[comp]}' and '{subjob_id}'"
+                    )
                 component_to_subjob[comp] = subjob_id
                 visited.add(comp)
             
@@ -149,41 +155,36 @@ class SubjobAnalyzer:
     
     def _identify_subjob_start_components(self, dag: nx.DiGraph, 
                                         subjob_components: Dict[str, List[str]]) -> Dict[str, List[str]]:
-        """Identify the start components for each subjob."""
+        """Identify the start components for each subjob"""
         subjob_start_components = {}
         
         for subjob_id, components in subjob_components.items():
             start_components = []
             
             # Find components that can start this subjob:
-            # 1. Startable components (for initial subjobs)
-            # 2. Components that are targets of control edges from other subjobs
+            # Has incoming control edges AND no incoming data edges
             for comp in components:
-                is_startable = dag.nodes[comp].get('startable', False)
+                has_incoming_control = any(
+                    edge_data.get('edge_type') == 'control'
+                    for _, _, edge_data in dag.in_edges(comp, data=True)
+                )
                 
-                # Check if component is target of control edge from different subjob
-                has_inter_subjob_control = False
-                for source, target, edge_data in dag.in_edges(comp, data=True):
-                    if (edge_data.get('edge_type') == 'control' and 
-                        self._component_to_subjob.get(source) != subjob_id):
-                        has_inter_subjob_control = True
-                        break
+                has_incoming_data = any(
+                    edge_data.get('edge_type') == 'data'
+                    for _, _, edge_data in dag.in_edges(comp, data=True)
+                )
                 
-                # Component is subjob start if it's startable OR receives control from other subjob
-                if is_startable or has_inter_subjob_control:
+                if has_incoming_control and not has_incoming_data:
                     start_components.append(comp)
             
-            # If no start components found, find components with no inbound control within subjob
+            # If no start components found using control edge logic,
+            # look for naturally startable components (for initial subjobs)
             if not start_components:
                 for comp in components:
-                    has_inbound_control_in_subjob = False
-                    for source, target, edge_data in dag.in_edges(comp, data=True):
-                        if (edge_data.get('edge_type') == 'control' and 
-                            source in components):  # Source is in same subjob
-                            has_inbound_control_in_subjob = True
-                            break
+                    is_startable = dag.nodes[comp].get('startable', False)
+                    has_no_incoming_edges = dag.in_degree(comp) == 0
                     
-                    if not has_inbound_control_in_subjob:
+                    if is_startable and has_no_incoming_edges:
                         start_components.append(comp)
             
             subjob_start_components[subjob_id] = sorted(start_components)
@@ -206,12 +207,12 @@ class SubjobAnalyzer:
                 dag.nodes[node]['subjob_id'] = self._component_to_subjob.get(node, 'unknown')
     
     def _validate_subjob_control_edges(self, dag: nx.DiGraph) -> List[str]:
-        """Validate subjob_ok/subjob_error edges are only on subjob start components and subjob-level constraints."""
+        """Validate subjob_ok/subjob_error edges are only on subjob start components."""
         errors = []
         
         # Find all components that have subjob_ok or subjob_error outgoing edges
         components_with_subjob_edges = set()
-        subjob_error_by_subjob = defaultdict(list)  # {subjob_id: [components_with_subjob_error]}
+        subjob_error_by_subjob = defaultdict(list)
         
         for source, target, edge_data in dag.edges(data=True):
             if (edge_data.get('edge_type') == 'control' and 
@@ -298,7 +299,7 @@ class SubjobAnalyzer:
     
     def _generate_subjob_metadata(self, dag: nx.DiGraph, 
                                  subjob_components: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
-        """Generate comprehensive metadata for each subjob with execution waves."""
+        """Generate metadata for each subjob with execution waves."""
         subjob_metadata = {}
         
         # Build subjob dependency graph for execution planning
@@ -325,17 +326,14 @@ class SubjobAnalyzer:
                     execution_wave = wave_idx
                     break
             
-            # Get subjob start components (those with is_subjob_start=True)
+            # Get subjob start components
             subjob_start_components = self._subjob_start_components.get(subjob_id, [])
             
-            # Identify startable components within subjob (those with startable=True)
+            # Identify startable components within subjob
             startable_in_subjob = [
                 comp for comp in components
                 if dag.nodes[comp].get('startable', False)
             ]
-            
-            # Calculate executor requirements for this subjob
-            executor_requirements = self._calculate_subjob_executor_requirements(dag, components)
             
             subjob_metadata[subjob_id] = {
                 'components': components,
@@ -345,9 +343,7 @@ class SubjobAnalyzer:
                 'resume_point': True,
                 'dependencies': sorted(list(subjob_deps.predecessors(subjob_id))),
                 'startable_components': sorted(startable_in_subjob),
-                'subjob_start_components': sorted(subjob_start_components),
-                'executor_requirements': executor_requirements,
-                'can_run_parallel': len(execution_waves[execution_wave]) > 1 if execution_wave < len(execution_waves) else False
+                'subjob_start_components': sorted(subjob_start_components)
             }
         
         # Add execution waves to metadata
@@ -409,62 +405,3 @@ class SubjobAnalyzer:
             remaining_subjobs -= set(current_wave)
         
         return execution_waves
-    
-    def _calculate_subjob_executor_requirements(self, dag: nx.DiGraph, 
-                                              components: List[str]) -> Dict[str, Any]:
-        """Calculate executor requirements for a subjob."""
-        threadpool_components = []
-        dask_components = []
-        disk_components = []
-        
-        total_dask_workers = 0
-        total_disk_cache = 0
-        
-        for comp in components:
-            node_data = dag.nodes[comp]
-            executor = node_data.get('config', {}).get('executor', 'threadpool')
-            
-            if executor == 'threadpool':
-                threadpool_components.append(comp)
-            elif executor == 'dask':
-                dask_components.append(comp)
-                # Sum up dask worker requirements
-                dask_config = node_data.get('config', {}).get('dask_config', {})
-                workers = dask_config.get('workers', 1)
-                total_dask_workers += workers
-            elif executor == 'disk_based':
-                disk_components.append(comp)
-                # Sum up disk cache requirements
-                disk_config = node_data.get('config', {}).get('disk_config', {})
-                cache_size = self._parse_size_string(disk_config.get('cache_size', '1GB'))
-                total_disk_cache += cache_size
-        
-        return {
-            'threadpool_components': threadpool_components,
-            'dask_components': dask_components,
-            'disk_components': disk_components,
-            'total_dask_workers_needed': total_dask_workers,
-            'total_disk_cache_needed_bytes': total_disk_cache,
-            'requires_parallel_execution': len(dask_components) > 0 or len(disk_components) > 0
-        }
-    
-    def _parse_size_string(self, size_str: str) -> int:
-        """Parse size string like '1GB' to bytes."""
-        if not size_str:
-            return 0
-            
-        size_str = size_str.upper().strip()
-        multipliers = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
-        
-        for suffix, multiplier in multipliers.items():
-            if size_str.endswith(suffix):
-                try:
-                    number = float(size_str[:-len(suffix)])
-                    return int(number * multiplier)
-                except ValueError:
-                    return 0
-        
-        try:
-            return int(float(size_str))  # Assume bytes if no suffix
-        except ValueError:
-            return 0

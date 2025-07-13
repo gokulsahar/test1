@@ -21,11 +21,6 @@ class InvalidConnectionError(GraphBuildError):
     pass
 
 
-class ExecutorConfigurationError(GraphBuildError):
-    """Raised when executor configuration is invalid."""
-    pass
-
-
 class GraphBuilder:
     """Core graph builder for converting JobModel to NetworkX DiGraph."""
     
@@ -51,15 +46,15 @@ class GraphBuilder:
         
         # Create component nodes with validation
         try:
-            self._create_component_nodes(dag, job_model.components, job_model.job_config)
+            self._create_component_nodes(dag, job_model.components)
         except GraphBuildError as e:
             errors.append(str(e))
         
-        #Validate data edges
+        # Validate data edges
         data_errors = self._validate_data_connections(dag, job_model.connections.data)
         errors.extend(data_errors)
         
-        #Validate control edges
+        # Validate control edges
         control_errors = self._validate_control_connections(dag, job_model.connections.control)
         errors.extend(control_errors)
         
@@ -73,8 +68,8 @@ class GraphBuilder:
         
         return dag
     
-    def _create_component_nodes(self, dag: nx.DiGraph, components: List[ComponentModel], job_config: Any) -> None:
-        """Create nodes with rich metadata and validate executor configuration."""
+    def _create_component_nodes(self, dag: nx.DiGraph, components: List[ComponentModel]) -> None:
+        """Create nodes with rich metadata."""
         for component in components:
             registry_metadata = self._validate_component_exists(component.type)
             
@@ -86,9 +81,6 @@ class GraphBuilder:
             self._validate_required_parameters(component.name, component.type, 
                                             registry_metadata.get('required_params', {}), 
                                             component.params)
-            
-            # Validate executor configuration
-            self._validate_executor_configuration(component, job_config)
             
             # Filter out timestamp columns to reduce metadata size
             filtered_metadata = {k: v for k, v in registry_metadata.items() 
@@ -103,55 +95,8 @@ class GraphBuilder:
                 'registry_metadata': filtered_metadata,
                 'input_ports': registry_metadata['input_ports'],
                 'output_ports': registry_metadata['output_ports'],
-                'dependencies': registry_metadata['dependencies'],
-                # Add executor information for execution manager
-                'executor': component.params.get('executor', 'threadpool'),
-                'executor_config': self._extract_executor_config(component)
+                'dependencies': registry_metadata['dependencies']
             })
-
-    def _validate_executor_configuration(self, component: ComponentModel, job_config: Any) -> None:
-        """Validate component executor configuration against job-level settings."""
-        executor = component.params.get('executor', 'threadpool')
-        
-        # Check if requested executor is enabled at job level
-        if hasattr(job_config, 'execution'):
-            execution_config = job_config.execution
-            
-            if executor == 'dask':
-                dask_config = getattr(execution_config, 'dask', None)
-                if not dask_config or not getattr(dask_config, 'enabled', False):
-                    raise ExecutorConfigurationError(
-                        f"Component '{component.name}' requests Dask executor but Dask is disabled in job_config"
-                    )
-                
-                # Validate required disk configuration
-                component_disk_config = component.params.get('disk_config', {})
-                if not component_disk_config.get('table_file'):
-                    raise ExecutorConfigurationError(
-                        f"Disk-based component '{component.name}' missing required 'table_file' in disk_config"
-                    )
-            
-            elif executor == 'disk_based':
-                disk_config = getattr(execution_config, 'disk_based', None)
-                if not disk_config or not getattr(disk_config, 'enabled', False):
-                    raise ExecutorConfigurationError(
-                        f"Component '{component.name}' requests disk_based executor but it's disabled in job_config"
-                    )
-    
-    def _extract_executor_config(self, component: ComponentModel) -> Dict[str, Any]:
-        """Extract executor-specific configuration from component."""
-        executor_config = {}
-        
-        if 'executor' in component.params:
-            executor_config['executor'] = component.params['executor']
-        
-        if 'dask_config' in component.params:
-            executor_config['dask_config'] = component.params['dask_config']
-        
-        if 'disk_config' in component.params:
-            executor_config['disk_config'] = component.params['disk_config']
-        
-        return executor_config
 
     def _validate_required_parameters(self, component_name: str, component_type: str, 
                                     required_params: Dict[str, Any], config: Dict[str, Any]) -> None:
@@ -324,7 +269,7 @@ class GraphBuilder:
         """
         Validate control edge constraints based on trigger type.
         
-        Updated rules:
+        Rules:
         - ok/subjob_ok: Multiple allowed to different targets (implicit parallelization)
         - error/subjob_error: Only one per component
         - if: Multiple allowed but unique order numbers per component
