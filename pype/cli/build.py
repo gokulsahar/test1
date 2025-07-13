@@ -13,7 +13,7 @@ from pype.core.loader.loader import load_job_yaml, LoaderError
 from pype.core.registry.component_registry import ComponentRegistry
 from pype.core.planner.planner import JobPlanner, CriticalPlanningError, PlanningPhaseError
 from pype.core.utils.constants import (
-    PJOB_EXTENSION, MANIFEST_FILE, ORIGINAL_YAML_FILE, 
+    PJOB_EXTENSION, ORIGINAL_YAML_FILE, 
     DAG_FILE, ASSETS_DIR, ENGINE_VERSION, FRAMEWORK_NAME
 )
 
@@ -132,21 +132,17 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
         raise click.Abort()
 
 
-
 def _create_pjob_file(pjob_file: Path, original_yaml: Path, job_model, plan_result):
-    """Create the .pjob ZIP file with all required components."""
+    """Create the .pjob ZIP file with envelope format per v1.1 specification."""
+    
+    # Preserve original YAML filename inside ZIP
+    preserved_yaml_name = original_yaml.name
     
     with zipfile.ZipFile(pjob_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # 1. Add manifest.json
-        manifest = _create_manifest(job_model, plan_result)
-        zf.writestr(MANIFEST_FILE, json.dumps(manifest, indent=2))
+        # 1. Add original YAML file with preserved filename
+        zf.write(original_yaml, preserved_yaml_name)
         
-        # 2. Add original YAML file
-        zf.write(original_yaml, ORIGINAL_YAML_FILE)
-        
-        # 3. Add serialized DAG using centralized planner method
-        # Note: plan_result should contain a reference to the planner that created it
-        # For now, create minimal planner instance for serialization
+        # 2. Add serialized DAG using centralized planner method
         from pype.core.registry.component_registry import ComponentRegistry
         from pype.core.planner.planner import JobPlanner
         
@@ -157,11 +153,11 @@ def _create_pjob_file(pjob_file: Path, original_yaml: Path, job_model, plan_resu
         dag_msgpack = msgpack.packb(dag_data)
         zf.writestr(DAG_FILE, dag_msgpack)
         
-        # 4. Add execution metadata
+        # 3. Add execution metadata
         execution_data = msgpack.packb(plan_result.execution_metadata)
         zf.writestr("execution_metadata.msgpack", execution_data)
         
-        # 5. Add subjob metadata
+        # 4. Add subjob metadata
         subjob_data = {
             'components': plan_result.subjob_components,
             'execution_order': plan_result.subjob_execution_order
@@ -169,12 +165,24 @@ def _create_pjob_file(pjob_file: Path, original_yaml: Path, job_model, plan_resu
         subjob_msgpack = msgpack.packb(subjob_data)
         zf.writestr("subjob_metadata.msgpack", subjob_msgpack)
         
-        # 6. Create assets directory (empty for now)
+        # 5. Create assets directory (empty for now)
         zf.writestr(f"{ASSETS_DIR}/", "")
+        
+        # 6. Create manifest metadata
+        manifest_data = _create_manifest_metadata(job_model, plan_result)
+        
+        # 7. Create manifest.json envelope (v1.1 specification format)
+        envelope = {
+            "format": "datapy-pjob@1",
+            "yaml": preserved_yaml_name,
+            "dag_msgpack": DAG_FILE,
+            "manifest": manifest_data
+        }
+        zf.writestr("manifest.json", json.dumps(envelope, indent=2))
 
 
-def _create_manifest(job_model, plan_result) -> Dict[str, Any]:
-    """Create manifest.json for the .pjob file."""
+def _create_manifest_metadata(job_model, plan_result) -> Dict[str, Any]:
+    """Create manifest metadata for the .pjob envelope."""
     return {
         "job_id": f"{job_model.job.name}_{job_model.job.version}",
         "job_name": job_model.job.name,
@@ -187,7 +195,7 @@ def _create_manifest(job_model, plan_result) -> Dict[str, Any]:
         "subjob_count": len(plan_result.subjob_components),
         "data_edge_count": plan_result.build_metadata.get("data_edge_count", 0),
         "control_edge_count": plan_result.build_metadata.get("control_edge_count", 0),
-        "startable_components": plan_result.execution_metadata.get("startable_components", []),
+        "job_starters": plan_result.execution_metadata.get("job_starters", []),
         "estimated_runtime_seconds": plan_result.execution_metadata.get("estimated_execution_time", 0),
         "checksums": {
             "dag": "sha256_placeholder",  # TODO: Implement in Phase 5
@@ -195,9 +203,6 @@ def _create_manifest(job_model, plan_result) -> Dict[str, Any]:
             "subjob_metadata": "sha256_placeholder"
         }
     }
-
-
-
 
 
 def _show_build_summary(plan_result, verbose_level: int):
@@ -227,23 +232,23 @@ def _show_build_summary(plan_result, verbose_level: int):
                 click.echo(f"  ... and {len(plan_result.validation_warnings) - 5} more")
     
     if verbose_level >= 3:
-        click.echo("\n=== Planning Diagnostics ===")
-        diagnostics = plan_result.planning_diagnostics
+        click.echo("\n=== Job Execution Details ===")
         
-        # Performance
-        perf = diagnostics.get('planning_performance', {})
-        click.echo(f"Planning time: {perf.get('total_duration_ms', 0):.1f}ms")
-        if 'bottleneck_phase' in perf:
-            click.echo(f"Bottleneck phase: {perf['bottleneck_phase']}")
-        
-        # Complexity
-        complexity = diagnostics.get('structural_complexity', {})
-        click.echo(f"Complexity score: {complexity.get('complexity_score', 0):.1f}")
-        click.echo(f"Max path depth: {complexity.get('max_path_depth', 0)}")
-        click.echo(f"Parallelism factor: {complexity.get('parallelism_factor', 0):.2f}")
+        # Job starters
+        job_starters = plan_result.execution_metadata.get("job_starters", [])
+        click.echo(f"Job starters: {', '.join(job_starters)}")
         
         # Execution estimates
         exec_meta = plan_result.execution_metadata
-        click.echo(f"Estimated runtime: {exec_meta.get('estimated_execution_time', 0)}s")
-        resources = exec_meta.get('resource_requirements', {})
-        click.echo(f"Memory estimate: {resources.get('memory_requirements_mb', 0)}MB")
+        estimated_time = exec_meta.get("estimated_execution_time", 0)
+        if estimated_time > 0:
+            click.echo(f"Estimated runtime: {estimated_time}s")
+        
+        # Job configuration
+        job_config = exec_meta.get("job_config", {})
+        execution_mode = job_config.get("execution_mode", "pandas")
+        click.echo(f"Execution mode: {execution_mode}")
+        
+        if execution_mode == "dask":
+            chunk_size = job_config.get("chunk_size", "200MB")
+            click.echo(f"Chunk size: {chunk_size}")
