@@ -4,18 +4,16 @@ DataPY Job Planner - Simplified job planning with essential functionality.
 This module orchestrates the complete job planning process, transforming a validated JobModel
 into an execution-ready PlanResult with metadata for runtime execution.
 
-The planner follows a strict 5-phase approach:
+The planner follows a strict 4-phase approach:
 1. Graph Building - Convert JobModel to NetworkX DAG
 2. Port Resolution - Resolve wildcard ports and validate connectivity
 3. Subjob Analysis - Detect subjob boundaries using control edges
 4. Structure Validation - Comprehensive DAG validation
-5. Metadata Generation - Create essential runtime data
 """
 
-import time
 from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import networkx as nx
 
 from pype.core.loader.loader import JobModel
@@ -102,14 +100,13 @@ class JobPlanner:
     Orchestrates complete job planning process with simplified approach.
     
     The JobPlanner transforms a validated JobModel into an execution-ready PlanResult
-    through five distinct phases, generating essential metadata for runtime execution.
+    through four distinct phases, generating essential metadata for runtime execution.
     
     Planning Phases:
     1. Graph Building: Convert JobModel to NetworkX DAG
     2. Port Resolution: Resolve wildcard ports and validate connectivity
     3. Subjob Analysis: Detect boundaries using control edges
     4. Structure Validation: Comprehensive DAG validation
-    5. Metadata Generation: Create essential runtime data
     """
     
     def __init__(self, registry: ComponentRegistry):
@@ -142,11 +139,9 @@ class JobPlanner:
             CriticalPlanningError: When critical errors prevent planning
             PlanningPhaseError: When a specific phase fails
         """
-        self._planning_start_time = time.perf_counter()
-        
         try:
             # Execute all planning phases in strict order
-            dag, subjob_components, subjob_metadata = self._execute_planning_phases(job_model)
+            dag, subjob_components, subjob_metadata, all_errors, all_warnings = self._execute_planning_phases(job_model)
             
             # Generate essential execution metadata
             execution_metadata = self._generate_execution_metadata(
@@ -162,8 +157,8 @@ class JobPlanner:
                 subjob_components=subjob_components,
                 subjob_metadata=subjob_metadata,
                 execution_metadata=execution_metadata,
-                all_errors=[],
-                all_warnings=[],
+                all_errors=all_errors,
+                all_warnings=all_warnings,
                 build_metadata=build_metadata
             )
             
@@ -182,13 +177,16 @@ class JobPlanner:
                 )]
             )
     
-    def _execute_planning_phases(self, job_model: JobModel) -> Tuple[nx.DiGraph, Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
+    def _execute_planning_phases(self, job_model: JobModel) -> Tuple[nx.DiGraph, Dict[str, List[str]], Dict[str, Dict[str, Any]], List[ValidationError], List[ValidationWarning]]:
         """
         Execute all planning phases with strict dependency management.
         
         Returns:
-            Tuple of (final_dag, subjob_components, subjob_metadata)
+            Tuple of (final_dag, subjob_components, subjob_metadata, all_errors, all_warnings)
         """
+        all_errors = []
+        all_warnings = []
+        
         # Phase 1: Graph Building
         dag = self._phase_1_graph_building(job_model)
         
@@ -199,9 +197,11 @@ class JobPlanner:
         subjob_components, subjob_metadata = self._phase_3_subjob_analysis(dag)
         
         # Phase 4: Structure Validation
-        self._phase_4_structure_validation(dag, subjob_components)
+        errors, warnings = self._phase_4_structure_validation(dag, subjob_components)
+        all_errors.extend(errors)
+        all_warnings.extend(warnings)
         
-        return dag, subjob_components, subjob_metadata
+        return dag, subjob_components, subjob_metadata, all_errors, all_warnings
     
     def _phase_1_graph_building(self, job_model: JobModel) -> nx.DiGraph:
         """
@@ -220,8 +220,6 @@ class JobPlanner:
         Raises:
             PlanningPhaseError: On critical graph building errors
         """
-        start_time = time.perf_counter()
-        
         try:
             dag = self.graph_builder.build_graph(job_model)
             return dag
@@ -252,8 +250,6 @@ class JobPlanner:
         Raises:
             PlanningPhaseError: On critical port resolution errors
         """
-        start_time = time.perf_counter()
-        
         try:
             updated_dag, errors = self.port_resolver.resolve_ports(dag)
             
@@ -296,8 +292,6 @@ class JobPlanner:
         Raises:
             PlanningPhaseError: On critical subjob analysis errors
         """
-        start_time = time.perf_counter()
-        
         try:
             subjob_components, subjob_metadata, errors = self.subjob_analyzer.analyze_subjobs(dag)
             
@@ -324,7 +318,7 @@ class JobPlanner:
                 )]
             )
     
-    def _phase_4_structure_validation(self, dag: nx.DiGraph, subjob_components: Dict[str, List[str]]) -> None:
+    def _phase_4_structure_validation(self, dag: nx.DiGraph, subjob_components: Dict[str, List[str]]) -> Tuple[List[ValidationError], List[ValidationWarning]]:
         """
         Phase 4: Comprehensive structure validation.
         
@@ -335,11 +329,12 @@ class JobPlanner:
             dag: Complete DAG from previous phases
             subjob_components: Subjob structure from Phase 3
             
+        Returns:
+            Tuple of (validation_errors, validation_warnings)
+            
         Raises:
             CriticalPlanningError: On critical validation errors that prevent execution
         """
-        start_time = time.perf_counter()
-        
         try:
             errors, warnings = self.structure_validator.validate_structure(dag)
             
@@ -350,6 +345,8 @@ class JobPlanner:
                     f"Structure validation failed with {len(critical_errors)} critical errors",
                     critical_errors
                 )
+            
+            return errors, warnings
                 
         except StructureValidationError as e:
             # Structure validation critical errors
@@ -374,11 +371,11 @@ class JobPlanner:
         Returns:
             Essential metadata dictionary for runtime execution
         """
-        # Create component dependency cache for runtime optimization
-        component_dependencies = self._create_dependency_cache(dag)
+        # Create component dependency cache and port mapping in single pass
+        component_dependencies, port_mapping = self._create_dependency_and_port_caches(dag)
         
-        # Create port mapping cache for data flow optimization
-        port_mapping = self._create_port_mapping_cache(dag)
+        # Create component-to-subjob lookup for O(1) access
+        component_to_subjob = self._create_component_subjob_lookup(subjob_components)
         
         # Extract all node metadata for engine
         node_metadata = {}
@@ -395,7 +392,7 @@ class JobPlanner:
                 'dependencies': data.get('dependencies', []),
                 'iterator_boundary': data.get('iterator_boundary', ''),
                 'is_subjob_start': data.get('is_subjob_start', False),
-                'subjob_id': self._get_component_subjob(node, subjob_components)
+                'subjob_id': component_to_subjob.get(node, 'main')
             }
         
         return {
@@ -409,64 +406,62 @@ class JobPlanner:
             'job_config': self._extract_job_config_metadata(job_model)
         }
     
-    def _create_dependency_cache(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[str]]]:
+    def _create_dependency_and_port_caches(self, dag: nx.DiGraph) -> Tuple[Dict[str, Dict[str, List[str]]], Dict[str, Dict[str, List[Tuple[str, str]]]]]:
         """
-        Pre-compute all component dependencies to avoid runtime graph traversal.
+        Create both dependency cache and port mapping in a single graph traversal.
         
         Returns:
-            {component_name: {'data': [upstream_data_deps], 'control': [upstream_control_deps]}}
+            Tuple of (component_dependencies, port_mapping)
         """
         dependencies = {}
+        port_mapping = {}
         
         for node in dag.nodes():
             data_deps = []
             control_deps = []
+            inputs = []
+            outputs = []
             
-            # Categorize incoming edges by type
+            # Process incoming edges
             for source, target, edge_data in dag.in_edges(node, data=True):
-                if edge_data.get('edge_type') == 'data':
+                edge_type = edge_data.get('edge_type')
+                if edge_type == 'data':
                     data_deps.append(source)
-                elif edge_data.get('edge_type') == 'control':
+                    target_port = edge_data.get('target_port', 'main')
+                    inputs.append((target_port, source))
+                elif edge_type == 'control':
                     control_deps.append(source)
+            
+            # Process outgoing edges
+            for source, target, edge_data in dag.out_edges(node, data=True):
+                if edge_data.get('edge_type') == 'data':
+                    source_port = edge_data.get('source_port', 'main')
+                    outputs.append((source_port, target))
             
             dependencies[node] = {
                 'data': sorted(data_deps),
                 'control': sorted(control_deps)
             }
-        
-        return dependencies
-    
-    def _create_port_mapping_cache(self, dag: nx.DiGraph) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
-        """
-        Create optimized port mapping for runtime.
-        
-        Returns:
-            {component_name: {'inputs': [(port, source_component)], 'outputs': [(port, target_component)]}}
-        """
-        port_mapping = {}
-        
-        for node in dag.nodes():
-            inputs = []
-            outputs = []
-            
-            # Map input connections
-            for source, target, edge_data in dag.in_edges(node, data=True):
-                if edge_data.get('edge_type') == 'data':
-                    target_port = edge_data.get('target_port', 'main')
-                    inputs.append((target_port, source))
-            
-            # Map output connections
-            for source, target, edge_data in dag.out_edges(node, data=True):
-                if edge_data.get('edge_type') == 'data':
-                    source_port = edge_data.get('source_port', 'main')
-                    outputs.append((source_port, target))
             
             port_mapping[node] = {
                 'inputs': sorted(inputs),
                 'outputs': sorted(outputs)
             }
         
-        return port_mapping
+        return dependencies, port_mapping
+    
+    def _create_component_subjob_lookup(self, subjob_components: Dict[str, List[str]]) -> Dict[str, str]:
+        """
+        Create O(1) lookup table for component-to-subjob mapping.
+        
+        Returns:
+            {component_name: subjob_id}
+        """
+        component_to_subjob = {}
+        for subjob_id, components in subjob_components.items():
+            for component in components:
+                component_to_subjob[component] = subjob_id
+        return component_to_subjob
     
     def _extract_job_config_metadata(self, job_model: JobModel) -> Dict[str, Any]:
         """Extract job configuration metadata for runtime decisions."""
@@ -488,7 +483,7 @@ class JobPlanner:
             'execution_config': execution_dict  
         }
         
-    def _get_component_subjob(self, component: str, subjob_components: Dict[str, List[str]]) -> str:
+    def _create_build_metadata(self, dag: nx.DiGraph, job_model: JobModel) -> Dict[str, Any]:
         """Create build metadata for the plan."""
         return {
             'build_timestamp': datetime.now().isoformat(),
@@ -537,5 +532,5 @@ class JobPlanner:
             Dictionary representation ready for msgpack serialization
         """
         # Convert to node-link format for serialization
-        dag_data = nx.node_link_data(dag, edges="links")
+        dag_data = nx.node_link_data(dag)
         return dag_data
