@@ -354,7 +354,7 @@ class JobPlanner:
                 )]
             )
     
-    def _phase_2_structure_validation(self, dag: nx.DiGraph, subjob_components: Dict[str, List[str]]) -> Tuple[List[ValidationError], List[ValidationWarning]]:
+    def _phase_2_structure_validation(self, dag: nx.DiGraph) -> Tuple[List[ValidationError], List[ValidationWarning]]:
         """
         Phase 2: Comprehensive structure validation.
         
