@@ -282,12 +282,20 @@ class ComponentRegistry(BaseSQLBackend):
         """Register all components found in the specified package."""
         registered_count = 0
         
+        # Security: Only allow pype.components and its subpackages
+        if not package.startswith('pype.components'):
+            return 0
+        
         try:
             pkg = importlib.import_module(package)
             
             for importer, modname, ispkg in pkgutil.walk_packages(
                 pkg.__path__, pkg.__name__ + "."
             ):
+                # Security: Double-check module path
+                if not modname.startswith('pype.components'):
+                    continue
+                    
                 if modname.endswith('.base'):
                     continue
                     
@@ -307,10 +315,10 @@ class ComponentRegistry(BaseSQLBackend):
                             if self.register_component(component_data):
                                 registered_count += 1
                                 
-                except (ImportError, AttributeError):
+                except (ImportError, AttributeError, ModuleNotFoundError):
                     continue
                     
-        except ImportError:
+        except (ImportError, ModuleNotFoundError):
             pass
         
         return registered_count

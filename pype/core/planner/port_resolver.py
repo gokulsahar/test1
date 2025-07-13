@@ -62,7 +62,8 @@ class WildcardMatcher:
     def _compile_underscore_regex(prefix: str) -> re.Pattern:
         """Compile regex that enforces underscore syntax for wildcard ports."""
         escaped_prefix = re.escape(prefix)
-        pattern = f"^{escaped_prefix}_(?:{PORT_NAME_RE})$"
+        port_chars = PORT_NAME_RE.strip('^$')
+        pattern = f"^{escaped_prefix}_{port_chars}$"
         return re.compile(pattern)
 
 

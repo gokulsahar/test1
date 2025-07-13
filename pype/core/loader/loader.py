@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import ruamel.yaml
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, ConfigDict, ValidationError
 from pype.core.loader.validator import validate_job_file
 from pype.core.loader.templater import resolve_template_yaml, TemplateError
 from pype.core.utils.constants import DEFAULT_ENCODING
@@ -36,8 +36,8 @@ class JobConfigModel(BaseModel):
     chunk_size: str = Field(default="200MB")
     execution: Optional[ExecutionConfigModel] = None
 
-    # Allow arbitrary additional fields
-    model_config = ConfigDict(extra="allow")
+    class Config:
+        extra = "allow"
 
     @field_validator('fail_strategy')
     @classmethod
@@ -52,7 +52,6 @@ class JobConfigModel(BaseModel):
         if v not in ["pandas", "dask"]:
             raise ValueError("execution_mode must be 'pandas' or 'dask'")
         return v
-
 
 class JobMetadataModel(BaseModel):
     """Pydantic model for job metadata."""
@@ -145,5 +144,12 @@ def load_job_yaml(file_path: Path, context: Optional[Dict[str, Any]] = None) -> 
     # Step 4: Create Pydantic model (final validation layer)
     try:
         return JobModel(**job_data)
+    except ValidationError as e:
+        # Convert Pydantic validation errors to readable format
+        error_messages = []
+        for error in e.errors():
+            field_path = ".".join(str(x) for x in error["loc"])
+            error_messages.append(f"{field_path}: {error['msg']}")
+        raise LoaderError("Job model validation failed", error_messages)
     except Exception as e:
         raise LoaderError(f"Job model validation failed: {e}")

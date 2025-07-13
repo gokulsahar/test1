@@ -82,10 +82,13 @@ class StructureValidator:
                 raise UnreachableComponentError(f"Unreachable components: {[e.component for e in reachability_errors]}")
             
             # Check for isolated components
-            self._validate_no_isolated_components(dag)
+            isolated_errors = self._validate_no_isolated_components(dag)
+            errors.extend(isolated_errors)
+
             
-            # Mark iterator boundaries
-            self._mark_iterator_boundaries(dag)
+            # Mark iterator boundaries and collect errors
+            iterator_errors = self._mark_iterator_boundaries(dag)
+            errors.extend(iterator_errors)
             
             # Non-critical validations
             errors.extend(self._validate_global_references(dag))
@@ -192,8 +195,9 @@ class StructureValidator:
 
         return startable_components
 
-    def _validate_no_isolated_components(self, dag: nx.DiGraph) -> None:
+    def _validate_no_isolated_components(self, dag: nx.DiGraph) -> List[ValidationError]:
         """Validate that no components are completely isolated."""
+        errors = []
         isolated_components = []
         
         for node in dag.nodes():
@@ -201,9 +205,12 @@ class StructureValidator:
                 isolated_components.append(node)
         
         if isolated_components:
-            raise StructureValidationError(
-                f"Isolated components found (no incoming or outgoing connections): {isolated_components}"
-            )
+            errors.append(ValidationError(
+                code="ISOLATED_COMPONENTS",
+                message=f"Isolated components found (no incoming or outgoing connections): {isolated_components}"
+            ))
+        
+        return errors
     
     def _mark_iterator_boundaries(self, dag: nx.DiGraph) -> List[ValidationError]:
         """Mark components with their iterator boundary using recursive algorithm."""

@@ -42,19 +42,9 @@ class BaseComponent(ABC):
         self.name = name
         self.config = config
         self._global_store = global_store
+        self.execution_mode = "pandas"  # Default execution mode - will be set by run()
         self._setup_called = False
         self._cleanup_called = False
-    
-    @property
-    def execution_mode(self) -> str:
-        """
-        Get the job-level execution mode from current execution context.
-        
-        Returns:
-            "pandas" or "dask" based on job configuration
-        """
-        # Will be set by run() method from context
-        return getattr(self, '_current_execution_mode', 'pandas')
     
     def run(
         self, 
@@ -74,6 +64,7 @@ class BaseComponent(ABC):
         Returns:
             Output DataFrames keyed by port name
         """
+        # Set execution mode from context
         self.execution_mode = context.get("execution_mode", "pandas")
         
         # Setup phase - called once per component instance

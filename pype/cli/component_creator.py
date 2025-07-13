@@ -2,7 +2,7 @@ import os
 import click
 from pathlib import Path
 from typing import Optional
-
+from pype.core.utils.constants import DEFAULT_ENCODING
 
 @click.command()
 @click.argument("component_name", required=False)
@@ -115,7 +115,7 @@ def create_component(component_name: Optional[str], non_interactive: bool,
     
     # Write file
     try:
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, 'w', encoding=DEFAULT_ENCODING) as f:
             f.write(component_code)
         
         click.echo()
@@ -352,14 +352,23 @@ def _generate_component_code(component_name: str, class_name: str, category: str
         execute_body = '''        # TODO: Implement data source reading logic
         # Example: Connect to database/API/file and read data
         
-        # Sample data creation (replace with your logic)
-        import pandas as pd
-        sample_data = pd.DataFrame({
-            "id": [1, 2, 3],
-            "value": ["a", "b", "c"]
-        })
+        # Create DataFrame based on execution mode
+        if self.execution_mode == "pandas":
+            import pandas as pd
+            sample_data = pd.DataFrame({
+                "id": [1, 2, 3],
+                "value": ["a", "b", "c"]
+            })
+        else:  # dask mode
+            import pandas as pd
+            import dask.dataframe as dd
+            sample_data = pd.DataFrame({
+                "id": [1, 2, 3],
+                "value": ["a", "b", "c"]
+            })
+            sample_data = dd.from_pandas(sample_data, npartitions=2)
         
-        return {"main": self._wrap_raw_data(sample_data, source=f"{self.name}_loaded")}'''
+        return {"main": sample_data}'''
         
     elif category == "sink":
         input_ports = '["main"]'
@@ -375,15 +384,17 @@ def _generate_component_code(component_name: str, class_name: str, category: str
         # Get input data
         input_data = inputs["main"]
         
+        # Convert to pandas for writing (if needed)
+        if self.execution_mode == "dask":
+            df = input_data.compute()  # Convert dask to pandas for writing
+        else:
+            df = input_data
+        
         # Example: Write data to database/file/API
-        df = input_data.to_pandas()
-        # write_logic_here(df)
+        # your_write_logic_here(df)
         
         # Pass through the data for potential chaining
-        return {"main": input_data.clone_with_data(
-            input_data.get_raw_data(),
-            source=f"{self.name}_written"
-        )}'''
+        return {"main": input_data}'''
         
     elif category == "transform":
         input_ports = '["main"]'
@@ -396,20 +407,20 @@ def _generate_component_code(component_name: str, class_name: str, category: str
         # Get input data
         input_data = inputs["main"]
         
-        # Example transformation
-        df = input_data.to_pandas()
+        # Apply transformation based on execution mode
+        if self.execution_mode == "pandas":
+            # Pandas transformation
+            transformed_df = input_data.copy()
+            # Add your pandas transformations here
+            # transformed_df = transformed_df[transformed_df['column'] > 0]
+            
+        else:  # dask mode
+            # Dask transformation
+            transformed_df = input_data.copy()
+            # Add your dask transformations here
+            # transformed_df = transformed_df[transformed_df['column'] > 0]
         
-        # Your transformation logic here
-        # transformed_df = df.copy()
-        # Add your transformations
-        
-        # For now, just pass through
-        transformed_df = df.copy()
-        
-        return {"main": self._wrap_raw_data(
-            transformed_df, 
-            source=f"{self.name}_transformed"
-        )}'''
+        return {"main": transformed_df}'''
         
     elif category == "quality":
         input_ports = '["main"]'
@@ -423,22 +434,39 @@ def _generate_component_code(component_name: str, class_name: str, category: str
         # Get input data
         input_data = inputs["main"]
         
-        # Example quality validation
-        df = input_data.to_pandas()
+        # Apply quality validation based on execution mode
+        if self.execution_mode == "pandas":
+            # Example quality validation
+            # valid_mask = input_data['column'].notnull()
+            # valid_df = input_data[valid_mask]
+            # rejected_df = input_data[~valid_mask]
+            
+            # For now, assume all data is valid
+            valid_df = input_data.copy()
+            import pandas as pd
+            rejected_df = pd.DataFrame()  # Empty rejected data
+            
+        else:  # dask mode
+            # Example quality validation for dask
+            # valid_mask = input_data['column'].notnull()
+            # valid_df = input_data[valid_mask]
+            # rejected_df = input_data[~valid_mask]
+            
+            # For now, assume all data is valid
+            valid_df = input_data.copy()
+            import pandas as pd
+            import dask.dataframe as dd
+            rejected_df = dd.from_pandas(pd.DataFrame(), npartitions=1)
         
-        # Your quality logic here
-        # valid_df = df[validation_condition]
-        # rejected_df = df[~validation_condition]
+        result = {"main": valid_df}
         
-        # For now, assume all data is valid
-        import pandas as pd
-        valid_df = df.copy()
-        rejected_df = pd.DataFrame()  # Empty rejected data
-        
-        result = {"main": self._wrap_raw_data(valid_df, source=f"{self.name}_validated")}
-        
-        if not rejected_df.empty:
-            result["rejected"] = self._wrap_raw_data(rejected_df, source=f"{self.name}_rejected")
+        # Only include rejected port if there's rejected data
+        if self.execution_mode == "pandas":
+            if not rejected_df.empty:
+                result["rejected"] = rejected_df
+        else:  # dask
+            if len(rejected_df) > 0:
+                result["rejected"] = rejected_df
         
         return result'''
         
@@ -453,19 +481,16 @@ def _generate_component_code(component_name: str, class_name: str, category: str
         # Get input data
         input_data = inputs["main"]
         
-        # Example utility operation
-        df = input_data.to_pandas()
+        # Apply utility operation based on execution mode
+        if self.execution_mode == "pandas":
+            # Your utility logic here for pandas
+            processed_df = input_data.copy()
+            
+        else:  # dask mode
+            # Your utility logic here for dask
+            processed_df = input_data.copy()
         
-        # Your utility logic here
-        # processed_df = utility_operation(df)
-        
-        # For now, just pass through
-        processed_df = df.copy()
-        
-        return {"main": self._wrap_raw_data(
-            processed_df, 
-            source=f"{self.name}_processed"
-        )}'''
+        return {"main": processed_df}'''
         
     else:  # misc
         input_ports = '["main"]'
@@ -476,26 +501,28 @@ def _generate_component_code(component_name: str, class_name: str, category: str
         # Get input data (if any)
         input_data = inputs.get("main")
         
-        if input_data:
-            # Process input data
-            df = input_data.to_pandas()
+        if input_data is not None:
+            # Process input data based on execution mode
+            if self.execution_mode == "pandas":
+                processed_df = input_data.copy()
+                # Your custom pandas logic here
+            else:  # dask mode
+                processed_df = input_data.copy()
+                # Your custom dask logic here
             
-            # Your custom logic here
-            processed_df = df.copy()
-            
-            return {"main": self._wrap_raw_data(
-                processed_df, 
-                source=f"{self.name}_processed"
-            )}
+            return {"main": processed_df}
         else:
-            # No input data - create your own
-            import pandas as pd
-            sample_data = pd.DataFrame({"result": ["completed"]})
+            # No input data - create your own based on execution mode
+            if self.execution_mode == "pandas":
+                import pandas as pd
+                sample_data = pd.DataFrame({"result": ["completed"]})
+            else:  # dask mode
+                import pandas as pd
+                import dask.dataframe as dd
+                sample_data = pd.DataFrame({"result": ["completed"]})
+                sample_data = dd.from_pandas(sample_data, npartitions=1)
             
-            return {"main": self._wrap_raw_data(
-                sample_data,
-                source=f"{self.name}_generated"
-            )}'''
+            return {"main": sample_data}'''
     
     # Generate lifecycle hooks for source and sink components
     lifecycle_hooks = ""
@@ -524,9 +551,10 @@ Category: {category}
 Created: Auto-generated by DataPY CLI
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Union
+import pandas as pd
+import dask.dataframe as dd
 from pype.components.base import BaseComponent
-from pype.core.engine.pipeline_data import PipelineData
 
 
 class {class_name}(BaseComponent):
@@ -551,16 +579,16 @@ class {class_name}(BaseComponent):
 {config_example}
     }}
     
-    def execute(self, context: Dict[str, Any], inputs: Dict[str, PipelineData]) -> Dict[str, PipelineData]:
+    def execute(self, context: Dict[str, Any], inputs: Dict[str, Union[pd.DataFrame, dd.DataFrame]]) -> Dict[str, Union[pd.DataFrame, dd.DataFrame]]:
         """
         Execute the {component_name} component.
         
         Args:
             context: Execution context with run metadata and global variables
-            inputs: Input PipelineData from upstream components
+            inputs: Input DataFrames from upstream components
             
         Returns:
-            Dictionary of output PipelineData for downstream components
+            Dictionary of output DataFrames for downstream components
         """
 {execute_body}{lifecycle_hooks}
 

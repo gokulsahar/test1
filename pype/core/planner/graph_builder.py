@@ -114,16 +114,32 @@ class GraphBuilder:
                     f"Component '{component_name}' (type: {component_type}) required parameter '{param_name}' cannot be None"
                 )
             
-            if isinstance(param_value, str) and param_value.strip() == "":
+            # Recursive validation for nested structures
+            self._validate_parameter_recursively(component_name, component_type, param_name, param_value)
+
+    def _validate_parameter_recursively(self, component_name: str, component_type: str, 
+                                    param_path: str, value: Any) -> None:
+        """Recursively validate parameter values, checking for empty strings in nested structures."""
+        if isinstance(value, str) and value.strip() == "":
+            raise GraphBuildError(
+                f"Component '{component_name}' (type: {component_type}) parameter '{param_path}' cannot be empty string"
+            )
+        elif isinstance(value, dict):
+            if len(value) == 0:
                 raise GraphBuildError(
-                    f"Component '{component_name}' (type: {component_type}) required parameter '{param_name}' cannot be empty string"
+                    f"Component '{component_name}' (type: {component_type}) parameter '{param_path}' cannot be empty dict"
                 )
-            
-            # Optional: Check for empty collections if you want to be strict
-            if isinstance(param_value, (list, dict)) and len(param_value) == 0:
+            for key, nested_value in value.items():
+                nested_path = f"{param_path}.{key}"
+                self._validate_parameter_recursively(component_name, component_type, nested_path, nested_value)
+        elif isinstance(value, list):
+            if len(value) == 0:
                 raise GraphBuildError(
-                    f"Component '{component_name}' (type: {component_type}) required parameter '{param_name}' cannot be empty {type(param_value).__name__}"
+                    f"Component '{component_name}' (type: {component_type}) parameter '{param_path}' cannot be empty list"
                 )
+            for idx, item in enumerate(value):
+                item_path = f"{param_path}[{idx}]"
+                self._validate_parameter_recursively(component_name, component_type, item_path, item)
     
     def _validate_component_exists(self, component_type: str) -> Dict[str, Any]:
         """

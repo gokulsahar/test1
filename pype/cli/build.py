@@ -14,7 +14,7 @@ from pype.core.registry.component_registry import ComponentRegistry
 from pype.core.planner.planner import JobPlanner, CriticalPlanningError, PlanningPhaseError
 from pype.core.utils.constants import (
     PJOB_EXTENSION, ORIGINAL_YAML_FILE, 
-    DAG_FILE, ASSETS_DIR, ENGINE_VERSION, FRAMEWORK_NAME
+    DAG_FILE, ASSETS_DIR, ENGINE_VERSION, FRAMEWORK_NAME,DEFAULT_ENCODING
 )
 
 
@@ -36,7 +36,7 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
         # Load context if provided
         context_data = {}
         if context:
-            with open(context, 'r') as f:
+            with open(context, 'r', encoding=DEFAULT_ENCODING) as f:
                 context_data = json.load(f)
             if verbose >= 1:
                 click.echo(f"Loaded context from {context}")
