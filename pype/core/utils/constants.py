@@ -6,11 +6,13 @@ DB_PATH = str(Path(__file__).resolve().parents[2] / "sql_db" / "datapy_metadata.
 # Schema file names
 JOB_SCHEMA_FILE = "job.schema.json"
 
-# Build artifact configuration
-PJOB_EXTENSION = ".pjob"
-MANIFEST_FILE = "manifest.json"
-ORIGINAL_YAML_FILE = "job_original.yaml"
-DAG_FILE = "dag.msgpack"
+# Build artifact configuration - UPDATED FOR FOLDER FORMAT
+JOB_FOLDER_SUFFIX = ""  # No suffix needed, using job name directly
+ORIGINAL_YAML_PRESERVED = True  # Keep original filename
+DAG_FILE_SUFFIX = "_dag.json"
+MANIFEST_FILE_SUFFIX = "_manifest.json"
+EXECUTION_METADATA_SUFFIX = "_execution_metadata.json"
+SUBJOB_METADATA_SUFFIX = "_subjob_metadata.json"
 ASSETS_DIR = "assets"
 
 # Component execution states
@@ -37,14 +39,10 @@ CONTEXT_VAR_PATTERN = r'\{\{\s*context\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
 SECRET_VAR_PATTERN = r'\{\{\s*secret\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}'
 GLOBAL_VAR_PATTERN = rf'\{{\{{\s*([a-zA-Z_][a-zA-Z0-9_]*){GLOBAL_VAR_DELIMITER}([a-zA-Z_][a-zA-Z0-9_]*)\s*\}}\}}'
 
-
 # forEach Component Constants
 FOREACH_COMPONENT_TYPE = "forEach"
 
-
 JOBLET_ROOT = Path(__file__).resolve().parents[3] / "joblets"
 JOBLET_EXTENSION = ".joblet.yaml"
-
-
 
 PORT_NAME_RE = r'^[a-zA-Z0-9_]+$'

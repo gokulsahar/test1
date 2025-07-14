@@ -29,20 +29,6 @@ cli.add_command(setup_command, name="setup")
 # Build commands
 cli.add_command(build_command, name="build")
 
-@cli.command()
-@click.argument("pjob_file", type=click.Path(exists=True))
-@click.option("--extract", type=click.Path(), help="Extract contents to directory")
-@click.option("--show-yaml", is_flag=True, help="Show original YAML content")
-@click.option("--show-dag", is_flag=True, help="Show detailed DAG information")
-def inspect(pjob_file, extract, show_yaml, show_dag):
-    """Inspect contents of a .pjob file."""
-    try:
-        from pype.cli.inspect_pjob import inspect_pjob_cli
-        inspect_pjob_cli(pjob_file, extract, show_yaml, show_dag)
-    except Exception as e:
-        click.echo(f"Inspection failed: {e}")
-        raise click.Abort()
-
 # Registry commands  
 cli.add_command(register_component_command, name="register-component")
 cli.add_command(register_component_command, name="register")  # Shorter alias
@@ -59,12 +45,13 @@ cli.add_command(component_examples, name="component-examples")
 
 # Placeholder commands for future phases
 @cli.command()
-@click.argument("job_file", type=click.Path(exists=True))
+@click.argument("job_folder", type=click.Path(exists=True))
 @click.option("--context", type=click.Path(exists=True), help="Context JSON file")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
-def run(job_file, context, resume):
-    """Run a .pjob file (Phase 2 - Not implemented yet)."""
+def run(job_folder, context, resume):
+    """Run a job folder (Phase 2 - Not implemented yet)."""
     click.echo("Run command will be implemented in Phase 2")
+    click.echo(f"Would execute job from: {job_folder}")
 
 
 @cli.command()
@@ -77,10 +64,10 @@ def create(job_name, template, output):
 
 
 @cli.command()
-@click.argument("input_dir", type=click.Path(exists=True))
+@click.argument("job_folder", type=click.Path(exists=True))
 @click.argument("output_file", type=click.Path())
-def pack(input_dir, output_file):
-    """Package job assets for distribution (Phase 6 - Not implemented yet)."""
+def pack(job_folder, output_file):
+    """Package job folder for distribution (Phase 6 - Not implemented yet)."""
     click.echo("Pack command will be implemented in Phase 6")
 
 

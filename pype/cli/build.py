@@ -1,7 +1,5 @@
 import json
 import time
-import zipfile
-import msgpack
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -13,24 +11,24 @@ from pype.core.loader.loader import load_job_yaml, LoaderError
 from pype.core.registry.component_registry import ComponentRegistry
 from pype.core.planner.planner import JobPlanner, CriticalPlanningError, PlanningPhaseError
 from pype.core.utils.constants import (
-    PJOB_EXTENSION, ORIGINAL_YAML_FILE, 
-    DAG_FILE, ASSETS_DIR, ENGINE_VERSION, FRAMEWORK_NAME,DEFAULT_ENCODING
+    DAG_FILE_SUFFIX, MANIFEST_FILE_SUFFIX, EXECUTION_METADATA_SUFFIX,
+    SUBJOB_METADATA_SUFFIX, ASSETS_DIR, ENGINE_VERSION, FRAMEWORK_NAME, DEFAULT_ENCODING
 )
 
 
 @click.command()
 @click.argument("job_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--output", "-o", type=click.Path(path_type=Path), 
-              help="Output directory (default: ./jobs/)")
+              help="Base output directory (default: ./jobs/)")
 @click.option("--context", type=click.Path(exists=True, path_type=Path),
               help="Context variables JSON file")
 @click.option("--verbose", "-v", count=True,
               help="Verbosity level: -v (basic), -vv (detailed), -vvv (full diagnostics)")
 @click.option("--force", "-f", is_flag=True,
-              help="Overwrite existing .pjob file if it exists")
+              help="Overwrite existing job folder if it exists")
 def build_command(job_file: Path, output: Optional[Path], context: Optional[Path], 
                  verbose: int, force: bool):
-    """Build a .pjob file from YAML job definition."""
+    """Build a job folder with JSON artifacts from YAML job definition."""
     
     try:
         # Load context if provided
@@ -41,21 +39,13 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
             if verbose >= 1:
                 click.echo(f"Loaded context from {context}")
         
-        # Determine output directory
+        # Determine base output directory
         if output is None:
             output = Path.cwd() / "jobs"
         output.mkdir(parents=True, exist_ok=True)
         
-        # Generate output filename
-        pjob_file = output / f"{job_file.stem}{PJOB_EXTENSION}"
-        
-        # Check if file exists and force not specified
-        if pjob_file.exists() and not force:
-            click.echo(f"Error: {pjob_file} already exists. Use --force to overwrite.")
-            raise click.Abort()
-        
         if verbose >= 1:
-            click.echo(f"Building {job_file} -> {pjob_file}")
+            click.echo(f"Building {job_file}...")
         
         # Start build process
         build_start = time.perf_counter()
@@ -73,9 +63,18 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
                     click.echo(f"  - {error}")
             raise click.Abort()
         
+        # Generate job folder path using job name from YAML
+        job_folder = output / job_model.job.name
+        
+        # Check if folder exists and force not specified
+        if job_folder.exists() and not force:
+            click.echo(f"Error: {job_folder} already exists. Use --force to overwrite.")
+            raise click.Abort()
+        
         if verbose >= 2:
             click.echo(f"   Loaded job '{job_model.job.name}' v{job_model.job.version}")
             click.echo(f"   Found {len(job_model.components)} components")
+            click.echo(f"   Target: {job_folder}")
         
         # Step 2: Initialize registry and planner
         if verbose >= 2:
@@ -103,24 +102,24 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
             if plan_result.validation_warnings:
                 click.echo(f"   {len(plan_result.validation_warnings)} warnings")
         
-        # Step 4: Create .pjob file
+        # Step 4: Create job folder
         if verbose >= 2:
-            click.echo("Step 4: Creating .pjob package...")
+            click.echo("Step 4: Creating job folder...")
         
-        _create_pjob_file(pjob_file, job_file, job_model, plan_result)
+        _create_job_folder(job_folder, job_file, job_model, plan_result, force)
         
         # Build complete
         build_duration = time.perf_counter() - build_start
         
         if verbose >= 1:
             click.echo(f" Build completed in {build_duration:.2f}s")
-            click.echo(f"  Output: {pjob_file}")
+            click.echo(f"  Output: {job_folder}")
             
             # Show summary
             if verbose >= 2:
                 _show_build_summary(plan_result, verbose)
         else:
-            click.echo(f"Built: {pjob_file}")
+            click.echo(f"Built: {job_folder}")
             
     except click.Abort:
         raise
@@ -132,88 +131,101 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
         raise click.Abort()
 
 
-def _create_pjob_file(pjob_file: Path, original_yaml: Path, job_model, plan_result):
-    """Create the .pjob ZIP file with envelope format per v1.1 specification."""
+def _create_job_folder(job_folder: Path, original_yaml: Path, job_model, plan_result, force: bool):
+    """Create the job folder with JSON artifacts."""
     
-    # Preserve original YAML filename inside ZIP
-    preserved_yaml_name = original_yaml.name
+    # Create/clear job folder
+    if job_folder.exists() and force:
+        import shutil
+        shutil.rmtree(job_folder)
+    job_folder.mkdir(parents=True, exist_ok=True)
     
-    with zipfile.ZipFile(pjob_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # 1. Add original YAML file with preserved filename
-        zf.write(original_yaml, preserved_yaml_name)
-        
-        # 2. Add serialized DAG using centralized planner method
-        from pype.core.registry.component_registry import ComponentRegistry
-        from pype.core.planner.planner import JobPlanner
-        
-        # Use a planner instance for consistent serialization
-        registry = ComponentRegistry()
-        planner = JobPlanner(registry)
-        dag_data = planner.serialize_dag_for_pjob(plan_result.dag)
-        dag_msgpack = msgpack.packb(dag_data)
-        zf.writestr(DAG_FILE, dag_msgpack)
-        
-        # 3. Add execution metadata
-        execution_data = msgpack.packb(plan_result.execution_metadata)
-        zf.writestr("execution_metadata.msgpack", execution_data)
-        
-        # 4. Add subjob metadata
-        subjob_data = {
-            'components': plan_result.subjob_components,
-            'execution_order': plan_result.subjob_execution_order
-        }
-        subjob_msgpack = msgpack.packb(subjob_data)
-        zf.writestr("subjob_metadata.msgpack", subjob_msgpack)
-        
-        # 5. Create assets directory (empty for now)
-        zf.writestr(f"{ASSETS_DIR}/", "")
-        
-        # 6. Create manifest metadata
-        manifest_data = _create_manifest_metadata(job_model, plan_result)
-        
-        # 7. Create manifest.json envelope (v1.1 specification format)
-        envelope = {
-            "format": "datapy-pjob@1",
-            "yaml": preserved_yaml_name,
-            "dag_msgpack": DAG_FILE,
-            "manifest": manifest_data
-        }
-        zf.writestr("manifest.json", json.dumps(envelope, indent=2))
+    # Get job name for file prefixes
+    job_name = job_model.job.name
+    
+    # 1. Copy original YAML file (preserve original filename)
+    original_yaml_dest = job_folder / original_yaml.name
+    import shutil
+    shutil.copy2(original_yaml, original_yaml_dest)
+    
+    # 2. Create DAG JSON file
+    dag_data = _serialize_dag_for_json(plan_result.dag)
+    dag_file = job_folder / f"{job_name}{DAG_FILE_SUFFIX}"
+    with open(dag_file, 'w', encoding=DEFAULT_ENCODING) as f:
+        json.dump(dag_data, f, indent=2, default=str)
+    
+    # 3. Create execution metadata JSON
+    execution_file = job_folder / f"{job_name}{EXECUTION_METADATA_SUFFIX}"
+    with open(execution_file, 'w', encoding=DEFAULT_ENCODING) as f:
+        json.dump(plan_result.execution_metadata, f, indent=2, default=str)
+    
+    # 4. Create subjob metadata JSON
+    subjob_data = {
+        'components': plan_result.subjob_components,
+        'execution_order': plan_result.subjob_execution_order
+    }
+    subjob_file = job_folder / f"{job_name}{SUBJOB_METADATA_SUFFIX}"
+    with open(subjob_file, 'w', encoding=DEFAULT_ENCODING) as f:
+        json.dump(subjob_data, f, indent=2, default=str)
+    
+    # 5. Create assets directory
+    assets_dir = job_folder / ASSETS_DIR
+    assets_dir.mkdir(exist_ok=True)
+    
+    # 6. Create manifest JSON
+    manifest_data = _create_manifest_metadata(job_model, plan_result, original_yaml.name)
+    manifest_file = job_folder / f"{job_name}{MANIFEST_FILE_SUFFIX}"
+    with open(manifest_file, 'w', encoding=DEFAULT_ENCODING) as f:
+        json.dump(manifest_data, f, indent=2, default=str)
 
 
-def _create_manifest_metadata(job_model, plan_result) -> Dict[str, Any]:
-    """Create manifest metadata for the .pjob envelope."""
+def _serialize_dag_for_json(dag: nx.DiGraph) -> Dict[str, Any]:
+    """Convert NetworkX DAG to JSON-compatible format."""
+    # Use NetworkX's node-link format which is JSON serializable
+    return nx.node_link_data(dag)
+
+
+def _create_manifest_metadata(job_model, plan_result, original_yaml_name: str) -> Dict[str, Any]:
+    """Create manifest metadata for the job folder."""
+    job_name = job_model.job.name
+    
     return {
+        "format": "datapy-job@2",  # New version for folder format
         "job_id": f"{job_model.job.name}_{job_model.job.version}",
         "job_name": job_model.job.name,
         "job_version": job_model.job.version,
         "build_timestamp": datetime.now().isoformat(),
         "engine_version": ENGINE_VERSION,
         "framework": FRAMEWORK_NAME,
-        "component_count": len(plan_result.dag.nodes()),
-        "edge_count": len(plan_result.dag.edges()),
-        "subjob_count": len(plan_result.subjob_components),
-        "data_edge_count": plan_result.build_metadata.get("data_edge_count", 0),
-        "control_edge_count": plan_result.build_metadata.get("control_edge_count", 0),
-        "job_starters": plan_result.execution_metadata.get("job_starters", []),
-        "estimated_runtime_seconds": plan_result.execution_metadata.get("estimated_execution_time", 0),
-        "checksums": {
-            "dag": "sha256_placeholder",  # TODO: Implement in Phase 5
-            "execution_metadata": "sha256_placeholder",
-            "subjob_metadata": "sha256_placeholder"
+        
+        # File references with new naming convention
+        "files": {
+            "original_yaml": original_yaml_name,
+            "dag": f"{job_name}{DAG_FILE_SUFFIX}",
+            "execution_metadata": f"{job_name}{EXECUTION_METADATA_SUFFIX}",
+            "subjob_metadata": f"{job_name}{SUBJOB_METADATA_SUFFIX}",
+            "manifest": f"{job_name}{MANIFEST_FILE_SUFFIX}"
+        },
+        
+        # Job statistics
+        "statistics": {
+            "component_count": len(plan_result.dag.nodes()),
+            "edge_count": len(plan_result.dag.edges()),
+            "subjob_count": len(plan_result.subjob_components),
+            "data_edge_count": plan_result.build_metadata.get("data_edge_count", 0),
+            "control_edge_count": plan_result.build_metadata.get("control_edge_count", 0),
+            "job_starters": plan_result.execution_metadata.get("job_starters", []),
+            "estimated_runtime_seconds": plan_result.execution_metadata.get("estimated_execution_time", 0)
         }
     }
 
 
-def _show_build_summary(plan_result, verbose_level: int, show_enhanced: bool = False):
+def _show_build_summary(plan_result, verbose_level: int):
     """Show build summary based on verbosity level."""
     
     if verbose_level >= 2:
-        header = "Build Summary" if show_enhanced else "=== Build Summary ==="
-        separator = "=" * 40
-        
-        click.echo(f"\n{header}")
-        click.echo(separator)
+        click.echo("\n=== Build Summary ===")
+        click.echo("=" * 40)
         
         # Basic stats
         click.echo(f"Components: {len(plan_result.dag.nodes())}")

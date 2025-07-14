@@ -16,31 +16,24 @@ COMMANDS:
 
 1. build
     Usage:
-        pype build
-
-    Description:
-        Build the ETL pipeline from configuration.
-
-------------------------------------------------------------
-
-2. inspect
-    Usage:
-        pype inspect <pjob_file> [OPTIONS]
+        pype build <job.yaml> [OPTIONS]
 
     Arguments:
-        pjob_file         Path to the .pjob file (required)
+        job.yaml              Path to the YAML job definition (required)
 
     Options:
-        --extract <dir>   Extract contents to a target directory
-        --show-yaml       Print the original YAML content inside the .pjob
-        --show-dag        Print detailed DAG structure from the .pjob
+        --output, -o <dir>    Base output directory (default: ./jobs/)
+        --context <file>      Path to a JSON context file
+        --verbose, -v         Verbosity level: -v (basic), -vv (detailed), -vvv (full)
+        --force, -f           Overwrite existing job folder if it exists
 
     Description:
-        Inspect the contents of a .pjob file, showing DAG info, YAML, or extracting files.
+        Build a job folder with JSON artifacts from YAML job definition.
+        Creates folder structure: jobs/{job_name}/
 
 ------------------------------------------------------------
 
-3. register-component  (alias: register)
+2. register-component  (alias: register)
     Usage:
         pype register-component
         pype register
@@ -50,7 +43,7 @@ COMMANDS:
 
 ------------------------------------------------------------
 
-4. list-components  (alias: list)
+3. list-components  (alias: list)
     Usage:
         pype list-components
         pype list
@@ -60,7 +53,7 @@ COMMANDS:
 
 ------------------------------------------------------------
 
-5. component-info  (alias: info)
+4. component-info  (alias: info)
     Usage:
         pype component-info
         pype info
@@ -70,7 +63,7 @@ COMMANDS:
 
 ------------------------------------------------------------
 
-6. delete-component
+5. delete-component
     Usage:
         pype delete-component
 
@@ -79,28 +72,28 @@ COMMANDS:
 
 ------------------------------------------------------------
 
-7. run
+6. run
     Usage:
-        pype run <job_file> [OPTIONS]
+        pype run <job_folder> [OPTIONS]
 
     Arguments:
-        job_file           Path to the .pjob file (required)
+        job_folder            Path to the job folder (required)
 
     Options:
-        --context <file>   Path to a JSON context file
-        --resume           Resume from last checkpoint if available
+        --context <file>      Path to a JSON context file
+        --resume              Resume from last checkpoint if available
 
     Description:
-        Placeholder for executing a .pjob file. (Phase 2 - Not implemented)
+        Execute a job folder. (Phase 2 - Not implemented)
 
 ------------------------------------------------------------
 
-8. create
+7. create
     Usage:
         pype create <job_name> [OPTIONS]
 
     Arguments:
-        job_name           Name of the job to create
+        job_name              Name of the job to create
 
     Options:
         --template [basic|etl|ml]    Type of job template (default: basic)
@@ -111,13 +104,89 @@ COMMANDS:
 
 ------------------------------------------------------------
 
-9. pack
+8. pack
     Usage:
-        pype pack <input_dir> <output_file>
+        pype pack <job_folder> <output_file>
 
     Arguments:
-        input_dir          Path to job folder
-        output_file        Destination .pjob file
+        job_folder            Path to job folder
+        output_file           Destination package file
 
     Description:
-        Package job assets into a .pjob file for sharing or deployment. (Phase 6 - Not implemented)
+        Package job folder for sharing or deployment. (Phase 6 - Not implemented)
+
+------------------------------------------------------------
+
+9. create-component
+    Usage:
+        pype create-component [component_name] [OPTIONS]
+
+    Description:
+        Create a new component with interactive prompts.
+
+------------------------------------------------------------
+
+10. component-template
+    Usage:
+        pype component-template <component_name> [OPTIONS]
+
+    Description:
+        Show component template without creating file.
+
+------------------------------------------------------------
+
+11. component-examples
+    Usage:
+        pype component-examples
+
+    Description:
+        Show examples of different component types with naming conventions.
+
+------------------------------------------------------------
+
+12. setup
+    Usage:
+        pype setup [OPTIONS]
+
+    Options:
+        --force               Force re-initialization even if already set up
+        --status              Show current setup status without making changes
+        --verbose, -v         Show detailed setup progress
+
+    Description:
+        Initialize DataPY workspace and check system readiness.
+
+====================================================================================================
+
+BUILD OUTPUT FORMAT CHANGE (v2.0):
+
+Previous Format (.pjob):
+    jobs/
+    └── sample_job.pjob          # ZIP file with msgpack
+
+New Format (Folder + JSON):
+    jobs/
+    └── simple_test_job/                          # job.name from YAML
+        ├── simple_test_job_manifest.json         # Build metadata
+        ├── sample_job.yaml                       # Original YAML (preserved name)
+        ├── simple_test_job_dag.json              # NetworkX DAG as JSON
+        ├── simple_test_job_execution_metadata.json  # Runtime execution data
+        ├── simple_test_job_subjob_metadata.json     # Subjob structure
+        └── assets/                               # Future: additional files
+
+Benefits:
+- Human-readable JSON files for debugging
+- Direct file access without extraction
+- Git-friendly folder structure
+- Easy production troubleshooting
+- Standard tools can inspect all artifacts
+
+Example Usage:
+    pype build test_jobs/sample_job.yaml
+    # Creates: jobs/simple_test_job/
+
+    pype build test_jobs/sample_job.yaml --output /data/jobs/
+    # Creates: /data/jobs/simple_test_job/
+
+    cat jobs/simple_test_job/simple_test_job_dag.json | jq '.nodes[0]'
+    # Direct JSON inspection

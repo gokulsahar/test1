@@ -363,7 +363,6 @@ class JobPlanner:
         
         Args:
             dag: Complete DAG from previous phases
-            subjob_components: Subjob structure from Phase 3
             
         Returns:
             Tuple of (validation_errors, validation_warnings)
@@ -652,17 +651,3 @@ class JobPlanner:
             execution_metadata=execution_metadata,
             build_metadata=build_metadata
         )
-        
-    def serialize_dag_for_pjob(self, dag: nx.DiGraph) -> Dict[str, Any]:
-        """
-        Convert NetworkX DAG to msgpack-compatible format for .pjob file.
-        
-        Args:
-            dag: NetworkX DiGraph with full metadata
-            
-        Returns:
-            Dictionary representation ready for msgpack serialization
-        """
-        # Convert to node-link format for serialization
-        dag_data = nx.node_link_data(dag)
-        return dag_data
