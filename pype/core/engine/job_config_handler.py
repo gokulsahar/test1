@@ -81,7 +81,7 @@ class JobConfigHandler:
             "JOB_CONFIG_INITIALIZED",
             extra={
                 "run_id": self.run_id,
-                "execution_mode": self.get_execution_mode(),
+                "execution_mode": self.job_config.get('execution_mode', 'pandas'),
                 "job_name": job_metadata.get('name'),
                 "job_version": job_metadata.get('version'),
                 "config_fields": list(self.job_config.keys())
@@ -305,7 +305,7 @@ class JobConfigHandler:
         """Create immutable execution context with all job configuration."""
         context_dict = {
             # Standard spec fields
-            "execution_mode": self.get_execution_mode(),
+            "execution_mode": self.job_config.get('execution_mode', 'pandas'),
             "run_id": self.run_id,
             "job": self.job_metadata.copy(),
             "subjob_id": None,  # Will be updated by orchestrator
@@ -316,7 +316,7 @@ class JobConfigHandler:
         }
         
         # Add dask info if in dask mode
-        if self.get_execution_mode() == 'dask' and self._dask_client:
+        if self.job_config.get('execution_mode', 'pandas') == 'dask' and self._dask_client:
             context_dict["dask"] = {
                 "cluster_uri": getattr(self._dask_client, 'scheduler', {}).get('address', 'local'),
                 "dashboard_link": getattr(self._dask_client, 'dashboard_link', None)
@@ -345,10 +345,6 @@ class JobConfigHandler:
         # Create immutable context
         self._context = MappingProxyType(context_dict)
     
-    def get_execution_mode(self) -> str:
-        """Get job execution mode."""
-        return self.job_config.get('execution_mode', 'pandas')
-    
     def get_threadpool(self) -> ThreadPoolExecutor:
         """Get configured threadpool for component execution."""
         if not self._threadpool:
@@ -360,7 +356,19 @@ class JobConfigHandler:
         return self._dask_client
     
     def get_context(self) -> MappingProxyType:
-        """Get immutable execution context."""
+        """
+        Get immutable execution context with ALL job_config fields.
+        
+        Context contains:
+        - Standard fields: execution_mode, run_id, job, subjob_id, attempt, threadpool, dask
+        - ALL job_config fields: timeout, retries, fail_strategy, chunk_size, etc.
+        - User custom fields: Any additional fields from job_config
+        
+        Access examples:
+        - context['execution_mode'] 
+        - context['timeout']
+        - context['custom_db_pool_size']  # User-defined field
+        """
         if not self._context:
             raise JobConfigError("Context not created")
         return self._context
@@ -385,7 +393,7 @@ class JobConfigHandler:
         if attempt is not None:
             context_dict["attempt"] = attempt
         
-        return MappingProxyType(context_dict)
+        return MappingProxyType(self._make_deeply_immutable(context_dict))
     
     def shutdown(self) -> None:
         """Clean up resources - threadpool and dask client."""
@@ -426,22 +434,7 @@ class JobConfigHandler:
             }
         )
     
-    def get_chunk_size_bytes(self) -> int:
-        """Get chunk size in bytes for data processing."""
-        chunk_size_str = self.job_config.get('chunk_size', DEFAULT_CHUNK_SIZE)
-        return parse_memory_size(chunk_size_str)
-    
-    def get_job_timeout(self) -> int:
-        """Get job timeout in seconds."""
-        return self.job_config.get('timeout', DEFAULT_TIMEOUT)
-    
-    def get_retry_count(self) -> int:
-        """Get retry count for subjob execution."""
-        return self.job_config.get('retries', DEFAULT_RETRIES)
-    
-    def get_fail_strategy(self) -> str:
-        """Get failure strategy (halt or continue)."""
-        return self.job_config.get('fail_strategy', 'halt')
+
     
     def _make_deeply_immutable(self, data: Any) -> Any:
         """
