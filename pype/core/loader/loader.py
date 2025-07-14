@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional
 import ruamel.yaml
 from pydantic import BaseModel, Field, field_validator, ConfigDict, ValidationError
 from pype.core.loader.validator import validate_job_file
-from pype.core.loader.templater import resolve_template_yaml, TemplateError
 from pype.core.utils.constants import DEFAULT_ENCODING
 
 
@@ -102,7 +101,7 @@ class LoaderError(Exception):
         super().__init__(message)
 
 
-def load_job_yaml(file_path: Path, context: Optional[Dict[str, Any]] = None) -> JobModel:
+def load_job_yaml(file_path: Path, context_data: Optional[Dict[str, Any]] = None) -> JobModel:
     """
     Load and validate job YAML file with optimized single-pass validation.
     
@@ -132,16 +131,10 @@ def load_job_yaml(file_path: Path, context: Optional[Dict[str, Any]] = None) -> 
     except Exception as e:
         raise LoaderError(f"Error loading YAML file: {e}")
     
-    # Step 3: Template resolution (if context provided)
-    if context:
-        try:
-            job_data = resolve_template_yaml(job_data, context)
-        except TemplateError as e:
-            raise LoaderError(f"Template resolution failed: {e}")
-        except Exception as e:
-            raise LoaderError(f"Unexpected error during template resolution: {e}")
+    # NOTE: Template resolution removed - happens at runtime
+    # Raw templates like {{context.variable}} are preserved in the JobModel
     
-    # Step 4: Create Pydantic model (final validation layer)
+    # Step 3: Create Pydantic model (final validation layer)
     try:
         return JobModel(**job_data)
     except ValidationError as e:

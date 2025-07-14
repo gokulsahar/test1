@@ -20,25 +20,14 @@ from pype.core.utils.constants import (
 @click.argument("job_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--output", "-o", type=click.Path(path_type=Path), 
               help="Base output directory (default: ./jobs/)")
-@click.option("--context", type=click.Path(exists=True, path_type=Path),
-              help="Context variables JSON file")
 @click.option("--verbose", "-v", count=True,
               help="Verbosity level: -v (basic), -vv (detailed), -vvv (full diagnostics)")
 @click.option("--force", "-f", is_flag=True,
               help="Overwrite existing job folder if it exists")
-def build_command(job_file: Path, output: Optional[Path], context: Optional[Path], 
-                 verbose: int, force: bool):
-    """Build a job folder with JSON artifacts from YAML job definition."""
+def build_command(job_file: Path, output: Optional[Path], verbose: int, force: bool):
+    """Build a job folder with JSON artifacts from YAML job definition"""
     
     try:
-        # Load context if provided
-        context_data = {}
-        if context:
-            with open(context, 'r', encoding=DEFAULT_ENCODING) as f:
-                context_data = json.load(f)
-            if verbose >= 1:
-                click.echo(f"Loaded context from {context}")
-        
         # Determine base output directory
         if output is None:
             output = Path.cwd() / "jobs"
@@ -55,7 +44,7 @@ def build_command(job_file: Path, output: Optional[Path], context: Optional[Path
             click.echo("Step 1: Loading and validating YAML...")
         
         try:
-            job_model = load_job_yaml(job_file, context_data)
+            job_model = load_job_yaml(job_file, context_data=None) 
         except LoaderError as e:
             click.echo(f"YAML validation failed: {e}")
             if e.errors:
@@ -168,11 +157,20 @@ def _create_job_folder(job_folder: Path, original_yaml: Path, job_model, plan_re
     with open(subjob_file, 'w', encoding=DEFAULT_ENCODING) as f:
         json.dump(subjob_data, f, indent=2, default=str)
     
-    # 5. Create assets directory
+    # 5. Create assets directory and context folder
     assets_dir = job_folder / ASSETS_DIR
     assets_dir.mkdir(exist_ok=True)
     
-    # 6. Create manifest JSON
+    context_dir = assets_dir / "context"
+    context_dir.mkdir(exist_ok=True)
+    
+    # 6. Create default context file
+    default_context_file = context_dir / f"{job_name}_context.json"
+    default_context = {}  # Empty context as requested
+    with open(default_context_file, 'w', encoding=DEFAULT_ENCODING) as f:
+        json.dump(default_context, f, indent=2)
+    
+    # 7. Create manifest JSON
     manifest_data = _create_manifest_metadata(job_model, plan_result, original_yaml.name)
     manifest_file = job_folder / f"{job_name}{MANIFEST_FILE_SUFFIX}"
     with open(manifest_file, 'w', encoding=DEFAULT_ENCODING) as f:

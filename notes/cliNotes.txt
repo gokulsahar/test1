@@ -1,4 +1,38 @@
-Pype CLI - Command Line Reference
+New Format (Folder + JSON + Runtime Templating):
+    jobs/
+    └── simple_test_job/                          # job.name from YAML
+        ├── simple_test_job_manifest.json         # Build metadata
+        ├── sample_job.yaml                       # Original YAML (preserved name)
+        ├── simple_test_job_dag.json              # NetworkX DAG as JSON (with raw templates)
+        ├── simple_test_job_execution_metadata.json  # Runtime execution data (with raw templates)
+        ├── simple_test_job_subjob_metadata.json     # Subjob structure
+        └── assets/
+            └── context/
+                ├── simple_test_job_context.json      # Default context (empty {})
+                ├── simple_test_job_dev.json          # Dev context (user-added)
+                └── simple_test_job_prod.json         # Prod context (user-added)
+
+Template Resolution Strategy:
+- BUILD TIME: No template resolution - raw templates preserved in JSON files
+- RUN TIME: Templates resolved from context files in assets/context/
+- Context variables: {{context.variable}} - values logged
+- Secret variables: {{secret.vault.path}} - only resolution status logged
+
+Benefits:
+- One build → Multiple executions with different contexts
+- Security: Secrets never stored in build artifacts  
+- Human-readable JSON files for debugging
+- Runtime flexibility for different environments
+- HashiCorp Vault integration ready (placeholder implemented)
+
+Example Usage:
+    # Build (no templating)
+    pype build test_jobs/sample_job.yaml
+    # Creates: jobs/simple_test_job/ with raw templates
+
+    # Run with different contexts
+    pype run jobs/simple_test_job                    # Uses simple_test_job_context.json
+    pype run jobs/simple_testPype CLI - Command Line Reference
 =================================
 
 Version: 0.1.0
@@ -23,13 +57,13 @@ COMMANDS:
 
     Options:
         --output, -o <dir>    Base output directory (default: ./jobs/)
-        --context <file>      Path to a JSON context file
         --verbose, -v         Verbosity level: -v (basic), -vv (detailed), -vvv (full)
         --force, -f           Overwrite existing job folder if it exists
 
     Description:
         Build a job folder with JSON artifacts from YAML job definition.
         Creates folder structure: jobs/{job_name}/
+        NO template resolution at build time - templates resolved at runtime.
 
 ------------------------------------------------------------
 
@@ -80,11 +114,14 @@ COMMANDS:
         job_folder            Path to the job folder (required)
 
     Options:
-        --context <file>      Path to a JSON context file
+        --context <name>      Context name (e.g., 'dev', 'prod'). 
+                             Defaults to {job_name}_context.json
+                             Looks for {job_name}_{context}.json
         --resume              Resume from last checkpoint if available
 
     Description:
-        Execute a job folder. (Phase 2 - Not implemented)
+        Execute a job folder with runtime template resolution. (Phase 2 - Not implemented)
+        Templates in component configs resolved from assets/context/ folder.
 
 ------------------------------------------------------------
 

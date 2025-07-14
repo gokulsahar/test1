@@ -46,12 +46,17 @@ cli.add_command(component_examples, name="component-examples")
 # Placeholder commands for future phases
 @cli.command()
 @click.argument("job_folder", type=click.Path(exists=True))
-@click.option("--context", type=click.Path(exists=True), help="Context JSON file")
+@click.option("--context", help="Context name (e.g., 'dev', 'prod') or defaults to job_name_context")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
 def run(job_folder, context, resume):
-    """Run a job folder (Phase 2 - Not implemented yet)."""
+    """Run a job folder with runtime template resolution (Phase 2 - Not implemented yet)."""
     click.echo("Run command will be implemented in Phase 2")
     click.echo(f"Would execute job from: {job_folder}")
+    if context:
+        click.echo(f"Using context: {context}")
+    else:
+        job_name = Path(job_folder).name
+        click.echo(f"Using default context: {job_name}_context.json")
 
 
 @cli.command()
