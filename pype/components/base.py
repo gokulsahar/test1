@@ -147,18 +147,22 @@ class BaseComponent(ABC):
             return default
         return self._global_store.get(full_key, default)
     
-    def set_global(self, variable_name: str, value, mode: str = "replace"):
+    def set_global(self, variable_name: str, value: Any) -> bool:
         """
         Set global variable value thread-safely in GlobalStore.
         
+        Global variables are immutable once set. Components can only add new
+        global variables, never replace existing ones.
+        
         Args:
             variable_name: Variable name without component prefix (must be in OUTPUT_GLOBALS)
-            value: Value to set (must be JSON serializable and <64KB)
-            mode: Update mode - "replace" or "accumulate"
+            value: Value to set (must be JSON serializable)
+            
+        Returns:
+            True if variable was set, False if already exists
             
         Raises:
             ValueError: If variable_name not declared in OUTPUT_GLOBALS
-            ValueError: If value exceeds 64KB or not serializable
             
         Example:
             self.set_global("row_count", 1500)  # Becomes "extract_customers__row_count"
@@ -171,10 +175,10 @@ class BaseComponent(ABC):
             )
         
         if not self._global_store:
-            return
+            return False
             
         full_key = f"{self.name}{GLOBAL_VAR_DELIMITER}{variable_name}"
-        self._global_store.set(full_key, value, mode=mode)
+        return self._global_store.set(full_key, value, component=self.name)
     
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.name})"

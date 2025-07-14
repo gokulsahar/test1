@@ -115,7 +115,7 @@ The tool will ask for:
    1. Component name (e.g., filter_active_users)
    2. Category (source, sink, transform, quality, utility, misc)
    3. Version (default: 1.0.0)
-   4. Author name
+   4. Author name&id
    5. Description
    6. Startable? (can start pipeline)
    7. Multi-input? (accept multiple connections)

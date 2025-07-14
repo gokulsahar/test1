@@ -176,7 +176,7 @@ def _interactive_configuration(component_name: str, category: Optional[str], non
     
     # Author
     config["author"] = click.prompt(
-        "Author name",
+        "Author name & ID",
         default=os.environ.get("USER", "DataPY Developer"),
         show_default=True
     )
