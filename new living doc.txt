@@ -993,3 +993,65 @@ Scenario	When does downstream sub-job unblock?	Parallelism impact
 b (ok) e_subjob	Immediately after b succeeds	e_subjob may start while other tasks in b's sub-job run.
 a (subjob_ok) d_subjob	After all components in a's sub-job succeed and tracker fires SUBJOB_OK	Guarantees ready globals & checkpoint consistency.
 x (subjob_error) y_subjob	On first failure inside x's sub-job	Matches Talend OnSubjobError.
+
+
+
+
+
+20. Enhanced Dependency Token System (v1.1.1)
+20.1 Problem Statement
+The original dependency token system in v1.1 suffered from token ambiguity where multiple control edge types from the same component generated identical tokens, making it impossible for the orchestrator to distinguish between different trigger conditions at runtime.
+Original Problem:
+json"dependency_tokens": {
+    "subjob_2": ["process_component"]  // Ambiguous - ok? error? if?
+}
+20.2 Solution: Explicit Trigger Encoding
+All dependency tokens now explicitly encode the trigger type in the token string, eliminating runtime ambiguity and enabling precise orchestrator decision-making.
+Token Format Specification
+Edge Type in YAMLToken FormatExampleFired Whencomp (ok)comp::okprocess_data::okComponent succeedscomp (error)comp::errorvalidate_schema::errorComponent failscomp (if1)comp::if1check_size::if1Component succeeds AND condition 1 = Truecomp (if2)comp::if2check_size::if2Component succeeds AND condition 2 = Truecomp (subjob_ok)SUBJOB_OK::<subjob_id>SUBJOB_OK::subjob_0All tasks in source subjob succeedcomp (subjob_error)SUBJOB_ERR::<subjob_id>SUBJOB_ERR::subjob_0First failure in source subjob
+Enhanced Token Generation Logic
+python# Planner token generation (implemented in _generate_dependency_tokens):
+if trigger == 'ok':
+    token = f"{source}::ok"
+elif trigger == 'error':
+    token = f"{source}::error"  
+elif trigger.startswith('if'):
+    token = f"{source}::{trigger}"  # e.g., "comp::if3"
+elif trigger == 'subjob_ok':
+    token = f"SUBJOB_OK::{source_subjob}"
+elif trigger == 'subjob_error':
+    token = f"SUBJOB_ERR::{source_subjob}"
+20.3 Orchestrator Token Clearing Contract
+The orchestrator implements precise token clearing based on component execution results:
+python# When component execution completes:
+if component_success:
+    clear_token(f"{comp_id}::ok")
+    
+    # Evaluate and clear conditional tokens
+    for if_edge in component_if_edges:
+        if evaluate_condition(if_edge.condition):
+            clear_token(f"{comp_id}::{if_edge.trigger}")  # e.g., "comp::if1"
+else:
+    clear_token(f"{comp_id}::error")
+
+# Subjob barrier tokens handled by SubJobTracker as before
+20.4 Multiple Edge Support
+Components can now have multiple control edges with unambiguous token resolution:
+YAML Example:
+yamlconnections:
+  control:
+    - "validator (ok) success_handler"
+    - "validator (error) error_handler"  
+    - "validator (if1): \"large_dataset\" optimization_handler"
+Generated Tokens:
+json"dependency_tokens": {
+    "subjob_success": ["validator::ok"],
+    "subjob_error": ["validator::error"],
+    "subjob_optimization": ["validator::if1"]
+}
+Runtime Behavior:
+
+If validator succeeds with large dataset → clears validator::ok AND validator::if1
+If validator succeeds with small dataset → clears only validator::ok
+If validator fails → clears only validator::error
+
