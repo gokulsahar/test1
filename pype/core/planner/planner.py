@@ -476,12 +476,12 @@ class JobPlanner:
                                 subjob_components: Dict[str, List[str]],
                                 component_to_subjob: Dict[str, str]) -> Dict[str, Set[str]]:
         """
-        Generate dependency tokens for event-driven scheduler.
+        Generate dependency tokens for event-driven scheduler with explicit trigger encoding.
         
-        For each edge:
-        - ok/error/if → token = <srcCompID>  
-        - subjob_ok → token = SUBJOB_OK::<srcSubJobID>
-        - subjob_error → token = SUBJOB_ERR::<srcSubJobID>
+        Token Format:
+        - ok/error/if edges → <componentID>::<trigger> (e.g., "comp_a::ok", "comp_b::error", "comp_c::if1")
+        - subjob_ok → SUBJOB_OK::<subjobID>
+        - subjob_error → SUBJOB_ERR::<subjobID>
         
         Args:
             dag: NetworkX DiGraph with components and edges
@@ -508,10 +508,16 @@ class JobPlanner:
                 
             trigger = edge_data.get('trigger', 'unknown')
             
-            # Generate appropriate token based on trigger type
-            if trigger in ['ok', 'error', 'if']:
-                # Component-level trigger: token = source component ID
-                token = source
+            # Generate appropriate token based on trigger type with explicit encoding
+            if trigger == 'ok':
+                # Component success trigger: token = <componentID>::ok
+                token = f"{source}::ok"
+            elif trigger == 'error':
+                # Component error trigger: token = <componentID>::error
+                token = f"{source}::error"
+            elif trigger.startswith('if'):
+                # Conditional trigger: token = <componentID>::<trigger> (e.g., comp::if1)
+                token = f"{source}::{trigger}"
             elif trigger == 'subjob_ok':
                 # Subjob completion trigger: token = SUBJOB_OK::<subjob_id>
                 token = f"SUBJOB_OK::{source_subjob}"
@@ -526,7 +532,7 @@ class JobPlanner:
             if target_subjob:
                 subjob_waiting_tokens[target_subjob].add(token)
         
-        # Process data edges to add data dependency tokens
+        # Process data edges to add data dependency tokens (if cross-subjob)
         for source, target, edge_data in dag.edges(data=True):
             if edge_data.get('edge_type') != 'data':
                 continue
