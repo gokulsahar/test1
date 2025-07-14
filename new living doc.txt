@@ -1,5 +1,5 @@
 DataPY V1.1 – Living Specification / Handoff Sheet 
-Last updated: 2025 07 12
+Last updated: 2025 07 15
 1 Business Goal & Scope (v1)
 Deliver a CLI first, YAML driven ETL framework—"Talend like" behaviour but 100 % Python and cloud agnostic—suitable for nightly batch jobs today and scalable to distributed clusters tomorrow.
 In scope for v1
@@ -8,9 +8,10 @@ In scope for v1
 •	Data edges + Control edges (ok, error, if, subjob_ok, subjob_error) with implicit parallelization via multiple control edges
 forEach iteration component with nested iteration support and iterator-aware subjob boundaries
 •	Context variable substitution + component global variable substitution
+•	**Runtime templating**: Context and secret resolution at execution time, not build time
 •	Execution mode and configurations are job level see the Json struct below
 •	SQLite component registry (schema locked)
-•	Build artefact .pjob (ZIP with manifest.json envelope, original YAML, dag.msgpack)
+•	**Build artefact**: Job folder with JSON files (human-readable, Git-friendly)
 •	Secrets via CyberArk only (env vars disallowed)
 •	Idempotency flags, retry/timeout, cascade skip semantics
 •	Structured JSON logging; metrics exporter interface, in dept logging during enginge execution
@@ -19,7 +20,7 @@ forEach iteration component with nested iteration support and iterator-aware sub
 Iterator-aware BufferedStore for efficient global variable management within iterations
 •	≤200 LOC per file, pluggable architecture, LOC excludes comments and blank lines
 Out of scope v1 (parking lot)
-scheduling, remote checkpoints (S3/GCS), advanced schema versioning, GUI, secret rotation.“Component-level retries, OR control-edge support and dead-branch detection are out-of-scope for v1 but are explicitly tracked in the post-v1 roadmap.”
+scheduling, remote checkpoints (S3/GCS), advanced schema versioning, GUI, secret rotation."Component-level retries, OR control-edge support and dead-branch detection are out-of-scope for v1 but are explicitly tracked in the post-v1 roadmap."
 Critical v1 Production Requirements
 •	Subjob Resume Logic: Checkpointing must properly handle subjob boundaries and allow resume from last successful subjob
 Iterator Subjob Management: forEach components force all downstream components into same subjob for atomic iteration processing
@@ -200,14 +201,15 @@ Iterator Subjob Management: forEach components force all downstream components i
   }
 }
 Notes:
-•	{{context.VAR}} resolved at compile-time for environment configuration
+•	**{{context.VAR}}** resolved at **runtime** for environment configuration from context files
+•	**{{secret.vault.path}}** resolved at **runtime** via HashiCorp Vault integration
 •	compName__GLOBAL_VAR resolved at runtime, after the component emits the global
 
 
 2 Core Packages and Ownership
 Package	Purpose
-pype.core.engine.*	Orchestrator, execution manager, multi-executor routing
-pype.core.loader.*	YAML→JobModel, templating, schema validation, CyberArk injection
+pype.core.engine.*	Orchestrator, execution manager, multi-executor routing, **runtime templating**
+pype.core.loader.*	YAML→JobModel, schema validation (**NO templating - moved to runtime**)
 pype.core.planner.*	DAG build, sub job detection, validation
 pype.core.registry.*	SQLite catalogue of components
 pype.core.observability.*	JSON logs, optional metrics, event hooks
@@ -225,13 +227,13 @@ Data classes & validation	pydantic	de facto standard in Python API projects
 CLI parsing	click	Stable, 10 yrs old
 DAG utilities	networkx	Widely cited academic & industrial graph lib
 Parallel data	dask[complete]	Broad adoption in data engineering
-Binary serialisation	msgpack	Small, fast, std like
+~~Binary serialisation~~	~~msgpack~~	~~Small, fast, std like~~ **REMOVED: Using JSON**
 HTTP client	requests	Used by custom CyberArk REST/CLI adapter
 Tabular data frame	pandas	Core in memory engine for small jobs
 Schema validation	jsonschema	Used in Loader validator
 
 
-## 4 File/Folder Layout (v1) - Simplified
+## 4 File/Folder Layout (v1) - Updated
 
 ```
 pyproject.toml  # dependency & metadata root file
@@ -240,20 +242,19 @@ pype/
 │   ├─ cli.py            
 │   ├─ build.py           
 │   ├─ run.py             
-│   ├─ compoennt_creator.py  
+│   ├─ component_creator.py  
 │   ├─ dag_visualize.py   
-│   ├─ inspect_pjob.py 
 │   ├─ setup.py
 │   └─ registry.py        
 ├─ core/
 │   ├─ engine/
 │   │   ├─ orchestrator.py        # High-level job coordination & flow control
 │   │   ├─ globals_store.py  
+│   │   ├─ templater.py           # **NEW: Runtime template resolution**
 │   │   └─ execution_manager.py   # Simplified executor routing (pandas/dask choice)
 │   ├─ loader/
-│   │   ├─ templater.py
 │   │   ├─ validator.py
-│   │   └─ loader.py
+│   │   └─ loader.py              # **UPDATED: No templating, raw templates preserved**
 │   ├─ planner/
 │   │   ├─ graph_builder.py
 │   │   ├─ port_resolver.py
@@ -261,7 +262,7 @@ pype/
 │   │   ├─ structure_validator.py
 │   │   └─ planner.py
 │   ├─ registry/
-│   │   ├─ componets_registry.py
+│   │   ├─ components_registry.py
 │   │   ├─ joblet_registry.py
 │   │   └─ sqlite_backend.py
 │   ├─ observability/
@@ -287,16 +288,16 @@ pype/
 ```
 
 ### Engine Module Requirement:
-Process the dag inside the .pjob build package
+Process the dag inside the **job folder** build package
 Must handle and route data and control connections
 Should be aware of subjob and iterator boundaries and should know how to process them
 SHould use asyncio and threadpooling from subjob management, parallelism etc. (important: topological sort to find the order first SHOULD BE DOEN ARE pLANNING phase)
 properly implement all the fetures in the job_config section of the json schema
 Robust Engine that ensures data safety and completion, can trade performance for this if needed
 
-Concurrency guard important – “The orchestrator MUST ensure that any blocking pandas/Disk-I/O code is executed via await loop.run_in_executor(pool, …) so the asyncio event-loop is never stalled.”
+Concurrency guard important – "The orchestrator MUST ensure that any blocking pandas/Disk-I/O code is executed via await loop.run_in_executor(pool, …) so the asyncio event-loop is never stalled."
 
-Retry scope – “v1 implements retries only at sub-job granularity; individual components inherit the sub-job attempt and never retry on their own.”
+Retry scope – "v1 implements retries only at sub-job granularity; individual components inherit the sub-job attempt and never retry on their own."
 
 
 ## 5 Control‑Flow Semantics (Simplified Model)
@@ -322,7 +323,7 @@ ok  – emitted when forEach component completes all iterations
 - Disk-based lookup components handle internal conversions with needed values set in optional params
 
 ### Data Handling Philosophy:
-- Engine passes raw DataFrames between components (no wrapper) {str:ANy} str froma nd tro address, Any actual data- pd or dask
+- Engine passes raw DataFrames between components (no wrapper) {str:Any} str froma nd tro address, Any actual data- pd or dask
 - Components receive pandas or dask DataFrames based on job execution mode
 - Zero conversion overhead within same execution mode
 - Lookup components handle disk operations and format conversion internally
@@ -336,20 +337,32 @@ Nested Support: Inner forEach components execute fully before outer forEach adva
 Error Handling: Errors within forEach scope handled per iteration; failures don't terminate entire forEach cycle
 
 
+## 6 Build Artefact - **UPDATED to Folder + JSON Format**
 
+**Job folder structure** with human-readable JSON files:
 
+```
+jobs/{job_name}/                                    # job.name from YAML
+├── {job_name}_manifest.json                       # Build metadata
+├── {original_filename}.yaml                       # Untouched source (preserved filename)
+├── {job_name}_dag.json                           # NetworkX DAG + metadata (JSON format)
+├── {job_name}_execution_metadata.json            # Execution configuration
+├── {job_name}_subjob_metadata.json               # Subjob structure and execution order
+└── assets/
+    └── context/
+        ├── {job_name}_context.json                # Default context (empty {})
+        ├── {job_name}_dev.json                    # Dev context (user-added)
+        └── {job_name}_prod.json                   # Prod context (user-added)
+```
 
+**Benefits over ZIP format:**
+- Human-readable JSON files for debugging
+- Direct file access without extraction overhead  
+- Git-friendly folder structure for version control
+- Production-friendly for monitoring and troubleshooting
+- Standard tools can inspect all artifacts
+- One build → multiple executions with different contexts
 
-
-
-## 6 Build Artefact (.pjob) - Updated Format
-
-ZIP container with envelope format:
-
-- **manifest.json** – envelope metadata: {"format":"datapy-pjob@1", "yaml":"job_original.yaml", "dag_msgpack":"dag.msgpack", "manifest":{...}}
-- **job_original_name.yaml** – untouched source for audit
-- **dag.msgpack** – networkx DAG + metadata
-- **assets/** – lookup files, templates, etc.
 
 ## 7 Registry Table Definition (v1) - Simplified
 
@@ -469,10 +482,76 @@ dask_job: dd.DataFrame → disk_lookup(internal conversion) → dd.DataFrame
 5. **Format Consistency**: Zero conversion overhead within same execution mode
 6. **Future Scaling**: Architecture ready for Spark as third execution mode
 7. **Industry Alignment**: Matches Netflix/Uber pattern of tool-per-job selection
+8. **Build Format**: Folder + JSON for human readability and production debugging
+9. **Runtime Templating**: Context and secrets resolved at execution time for flexibility
 
 
+## **13 Runtime Template Resolution (v1.1 - NEW)**
 
+### Template Resolution Strategy:
+- **BUILD TIME**: No template resolution - raw templates preserved in JSON files
+- **RUN TIME**: Templates resolved from context files in `assets/context/` folder
+- **Security**: Secrets never stored in build artifacts, resolved at runtime only
 
+### Template Patterns:
+```yaml
+# Context variables (resolved from context files)
+database_url: "{{context.db_url}}"
+timeout: "{{context.api_timeout}}"
+
+# Secret variables (resolved from HashiCorp Vault)
+password: "{{secret.database.prod.password}}"
+api_key: "{{secret.services.external_api.key}}"
+
+# Global variables (existing functionality - runtime resolution)
+row_count: "{{extract_component__total_rows}}"
+```
+
+### Context File Management:
+```bash
+# Build creates default context
+pype build job.yaml
+# Creates: jobs/simple_test_job/assets/context/simple_test_job_context.json (empty {})
+
+# User adds environment-specific contexts
+echo '{"db_url": "dev-db.com", "timeout": 30}' > jobs/simple_test_job/assets/context/simple_test_job_dev.json
+echo '{"db_url": "prod-db.com", "timeout": 60}' > jobs/simple_test_job/assets/context/simple_test_job_prod.json
+
+# Runtime execution with different contexts
+pype run jobs/simple_test_job                    # Uses simple_test_job_context.json
+pype run jobs/simple_test_job --context dev     # Uses simple_test_job_dev.json
+pype run jobs/simple_test_job --context prod    # Uses simple_test_job_prod.json
+```
+
+### Runtime Templater (`pype/core/engine/templater.py`):
+```python
+class RuntimeTemplater:
+    """Handles runtime template resolution for job execution."""
+    
+    def resolve_dag_templates(self, dag_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve templates in DAG component configurations."""
+        
+    def resolve_execution_metadata_templates(self, exec_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve templates in execution metadata."""
+    
+    def _resolve_context_variables(self, template: str) -> str:
+        """Resolve {{context.variable}} patterns."""
+        
+    def _resolve_secret_variables(self, template: str) -> str:
+        """Resolve {{secret.vault.path}} patterns via HashiCorp Vault."""
+```
+
+### Logging Behavior:
+- **Context Values**: Logged with actual values for debugging
+- **Secret Values**: NEVER logged - only resolution status (success/failure)
+- **Template Resolution**: Comprehensive logging of template processing events
+
+### Benefits:
+- **One Build → Multiple Executions**: Single job folder, different contexts
+- **Security**: Secrets never stored in build artifacts
+- **Flexibility**: Change context without rebuilding
+- **Environment Separation**: Dev/staging/prod contexts
+- **HashiCorp Vault Ready**: Placeholder implementation for secrets
 
 
 Checkpointing (v1) –
@@ -501,7 +580,7 @@ DataPY emits structured JSON logs for every component event (start, finish, erro
 • Thread-safety: protected by `threading.RLock`; reads are lock-free, writes occur inside the lock.  
 • API:  
   - `get(key, default=None)`  
-  - `set(key, value, *, mode="replace|accumulate")` → rejects JSON payload > 64 KB  
+  - `set(key, value, *, mode="replace|accumulate")` → rejects JSON payload > 64 KB  
   - `revision()` → monotonic int  
   - `dump() -> bytes` / `from_dump(raw) -> GlobalStore` (msgpack `{rev,data}`).  
 • Logging: every successful `set()` emits `GLOBAL_SET {rev,key,value,component}` to the JSON log.
@@ -647,12 +726,14 @@ CLI enforcement of --log-file is handled by the top-level run.py, build.py, etc.
 
 15. forEach Iteration Model (v1.1)
 forEach Component Specification
-pythonclass ForEachComponent(BaseComponent):
+```python
+class ForEachComponent(BaseComponent):
     COMPONENT_NAME = "forEach"
     CATEGORY = "control"
     INPUT_PORTS = ["main"]           # DataFrame with items to iterate
     OUTPUT_PORTS = ["item"]          # Current item as DataFrame
     OUTPUT_GLOBALS = ["current_item", "current_index", "total_items", "ok "]
+```
 Iterator Boundary Processing
 
 Subjob Dominance: forEach components force all downstream components into same subjob, overriding normal control edge subjob boundary rules
@@ -664,7 +745,8 @@ Nesting Depth: No limit on iterator nesting depth; engine processes recursively 
 Iterator Metadata (Planner Stage)
 
 Iterator Hierarchy: Planner generates execution tree showing iterator nesting relationships with enhanced metadata:
-pythoniterator_metadata = {
+```python
+iterator_metadata = {
     "forEach_files": {
         "iterator_depth": 0,
         "outer_iterator": None,
@@ -673,6 +755,7 @@ pythoniterator_metadata = {
         "completion_targets": ["final_cleanup"]
     }
 }
+```
 
 Loop Entry/Exit Points: Components marked with iterator depth and boundary positions
 Execution Waves: Iterator-aware execution waves account for loop boundaries and data dependencies
@@ -696,14 +779,17 @@ Memory Efficiency: Prevents GlobalStore lock contention during high-frequency it
 
 16. Subjob Boundary Rules (Updated for forEach)
 Standard Subjob Boundary Creation
-yaml# These create subjob boundaries:
+```yaml
+# These create subjob boundaries:
 connections:
   control:
     - "component_A (subjob_ok) component_B"     # Creates boundary
     - "component_A (subjob_error) component_B"  # Creates boundary
     - "forEach_comp (ok ) final_cleanup" # Creates boundary
+```
 forEach Subjob Dominance Rules
-yaml# forEach forces downstream components into same subjob:
+```yaml
+# forEach forces downstream components into same subjob:
 components:
   - name: forEach_files
     type: forEach
@@ -725,8 +811,10 @@ connections:
     
     # ✅ Creates new subjob:
     - "forEach_files (ok ) final_cleanup"
+```
 Validation Rules
-python# Planner validation checks:
+```python
+# Planner validation checks:
 def validate_forEach_subjob_rules(dag):
     """Validate forEach subjob dominance rules"""
     errors = []
@@ -747,16 +835,20 @@ def validate_forEach_subjob_rules(dag):
                     )
     
     return errors
+```
 17. Enhanced Iterator Boundary Marking
 Boundary Marking Metadata (Enhanced)
-python# Enhanced component metadata:
+```python
+# Enhanced component metadata:
 dag.nodes[component]['iterator_boundary'] = "forEach_files"    # Primary boundary
 dag.nodes[component]['iterator_depth'] = 2                     # Nesting level  
 dag.nodes[component]['outer_iterator'] = "forEach_customers"   # Parent iterator
 dag.nodes[component]['is_subjob_start'] = False               # Existing metadata
 dag.nodes[component]['subjob_id'] = "subjob_1"                # Forced by forEach
+```
 Subjob Metadata Integration
-python# Enhanced subjob metadata:
+```python
+# Enhanced subjob metadata:
 subjob_metadata = {
     'subjob_1': {
         'components': ['forEach_customers', 'get_orders', 'forEach_orders', 'process_order'],
@@ -779,6 +871,7 @@ subjob_metadata = {
         }
     }
 }
+```
 18. Engine Execution Strategy (Updated)
 Orchestrator (Level 1) - Enhanced for forEach:
 
@@ -798,7 +891,8 @@ Handles disk component internal conversions
 Direct DataFrame passing (no wrapper overhead)
 
 forEach Execution Flow:
-python# Simplified forEach execution model:
+```python
+# Simplified forEach execution model:
 async def execute_forEach_subjob(self, subjob_id, iterator_metadata):
     """Execute subjob containing forEach components with recursive nesting"""
     
@@ -827,14 +921,15 @@ async def _execute_nested_forEach(self, forEach_comp, iterator_metadata):
             await self._execute_nested_forEach(nested_comp, iterator_metadata)
         
         iteration_count += 1
+```
 
 
 
 
-9  Event-Driven Scheduler & SubJobTracker (v1.1 Addendum)
-This addendum replaces the former “execution-wave” planner logic with a deterministic, Talend-compatible token-based scheduler that maximises parallelism while preserving subjob_* semantics.
+19  Event-Driven Scheduler & SubJobTracker (v1.1 Addendum)
+This addendum replaces the former "execution-wave" planner logic with a deterministic, Talend-compatible token-based scheduler that maximises parallelism while preserving subjob_* semantics.
 
-19.1  Planning-time – Dependency-Token Map
+19.1  Planning-time – Dependency-Token Map
 For every control edge the planner now emits a token instead of pre-grouping sub-jobs into waves.
 
 Trigger type in YAML	Token generated	Meaning at runtime
@@ -842,11 +937,9 @@ ok, error, if…	<SourceComponentID>	Fires when that component finishes (success
 subjob_ok	SUBJOB_OK::<SourceSubJobID>	Fires when all tasks in the source sub-job succeed.
 subjob_error	SUBJOB_ERR::<SourceSubJobID>	Fires on first failure inside the source sub-job.
 
-Planner output (dag.msgpack) gains two new top-level keys:
+Planner output (**job folder JSON files**) gains two new top-level keys:
 
-python
-Copy
-Edit
+```python
 "dependency_tokens": {                 # {targetSubJob: set(tokens)}
     "subjob_2": {"b", "SUBJOB_OK::subjob_0"},
     ...
@@ -855,10 +948,9 @@ Edit
     "subjob_0": ["a", "b", "c"],
     ...
 }
-19.2  Runtime – Ready-Queue Algorithm
-text
-Copy
-Edit
+```
+19.2  Runtime – Ready-Queue Algorithm
+```
 ready_q        ← deque(sub-jobs with no waiting tokens)
 running_q      ← set()
 completed_comp ← set()
@@ -872,12 +964,11 @@ while ready_q or running_q:
         • If tracker fires SUBJOB_OK / SUBJOB_ERR, clear those tokens too
         • Any sub-job whose waiting_set is now ∅ → ready_q.append()
         • When last component of a sub-job reports → running_q.discard()
+```
 Blocking pandas / disk I-O continues to run under loop.run_in_executor(pool, …).
 
-19.3  SubJobTracker (one per sub-job)
-python
-Copy
-Edit
+19.3  SubJobTracker (one per sub-job)
+```python
 @dataclass
 class SubJobTracker:
     total_tasks: int
@@ -894,11 +985,11 @@ class SubJobTracker:
                                         and self.succeeded_tasks == self.total_tasks
                                         and not self.ok_fired)
     def fire_err(self) -> bool: return (self.failed and not self.err_fired)
+```
 Checkpoint & structured log entries are written the first time fire_ok() or fire_err() returns True.
 
-19.4  Behaviour Reference Matrix
+19.4  Behaviour Reference Matrix
 Scenario	When does downstream sub-job unblock?	Parallelism impact
-b (ok) e_subjob	Immediately after b succeeds	e_subjob may start while other tasks in b’s sub-job run.
-a (subjob_ok) d_subjob	After all components in a’s sub-job succeed and tracker fires SUBJOB_OK	Guarantees ready globals & checkpoint consistency.
-x (subjob_error) y_subjob	On first failure inside x’s sub-job	Matches Talend OnSubjobError.
-
+b (ok) e_subjob	Immediately after b succeeds	e_subjob may start while other tasks in b's sub-job run.
+a (subjob_ok) d_subjob	After all components in a's sub-job succeed and tracker fires SUBJOB_OK	Guarantees ready globals & checkpoint consistency.
+x (subjob_error) y_subjob	On first failure inside x's sub-job	Matches Talend OnSubjobError.
