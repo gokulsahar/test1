@@ -227,7 +227,7 @@ Data classes & validation	pydantic	de facto standard in Python API projects
 CLI parsing	click	Stable, 10 yrs old
 DAG utilities	networkx	Widely cited academic & industrial graph lib
 Parallel data	dask[complete]	Broad adoption in data engineering
-~~Binary serialisation~~	~~msgpack~~	~~Small, fast, std like~~ **REMOVED: Using JSON**
+**REMOVED: Using JSON**
 HTTP client	requests	Used by custom CyberArk REST/CLI adapter
 Tabular data frame	pandas	Core in memory engine for small jobs
 Schema validation	jsonschema	Used in Loader validator
@@ -582,7 +582,7 @@ DataPY emits structured JSON logs for every component event (start, finish, erro
   - `get(key, default=None)`  
   - `set(key, value, *, mode="replace|accumulate")` → rejects JSON payload > 64 KB  
   - `revision()` → monotonic int  
-  - `dump() -> bytes` / `from_dump(raw) -> GlobalStore` (msgpack `{rev,data}`).  
+  - `dump() -> bytes` / `from_dump(raw) -> GlobalStore`.  
 • Logging: every successful `set()` emits `GLOBAL_SET {rev,key,value,component}` to the JSON log.
 
 ### 2. BufferedStore (iterator boundaries)
@@ -604,7 +604,7 @@ DataPY emits structured JSON logs for every component event (start, finish, erro
 
 ### 5. Checkpoint / Resume
 • On every sub-job boundary the engine persists:  
-  - `globals.msgpack` ← `GlobalStore.dump()`  
+  - `globals.json` ← `GlobalStore.dump()`  
   - `edge_manifest.json` ← list of `data_ref`s  
 • `resume` restores via `GlobalStore.from_dump()` and verifies SHA-256 of each `data_ref`.
 
