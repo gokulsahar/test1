@@ -43,7 +43,7 @@ class GlobalStore:
         
     def get(self, key: str, default: Any = None) -> Any:
         """
-        Get global variable value (consistent deep-copy for thread safety).
+        Get global variable value (thread-safe with consistent deep-copy).
         
         Args:
             key: Global variable key (component_name__variable_name format)
@@ -52,8 +52,15 @@ class GlobalStore:
         Returns:
             Deep copy of stored value or default
         """
-        value = self._data.get(key, default)
-        return self._safe_copy(value)
+        # Thread-safe read with per-key locking for consistency with set()
+        if key not in self._data:
+            return self._safe_copy(default)
+        
+        lock = self._get_key_lock(key)
+        with lock:
+            # Double-check after acquiring lock
+            value = self._data.get(key, default)
+            return self._safe_copy(value)
     
     def set(self, key: str, value: Any, component: str = "unknown", mode: str = "replace") -> bool:
         """
@@ -146,16 +153,16 @@ class GlobalStore:
     
     def _get_key_lock(self, key: str) -> threading.RLock:
         """Get or create lock for key with periodic cleanup to prevent memory leaks."""
-        current_time = time.time()
-        
         with self._global_lock:
-            # Clean up old unused locks every 5 minutes
+            # Create lock if needed
+            if key not in self._locks:
+                self._locks[key] = threading.RLock()
+            
+            # Periodic cleanup (check time outside critical section next time)
+            current_time = time.time()
             if current_time - self._last_cleanup > 300:
                 self._cleanup_unused_locks()
                 self._last_cleanup = current_time
-            
-            if key not in self._locks:
-                self._locks[key] = threading.RLock()
             
             return self._locks[key]
     

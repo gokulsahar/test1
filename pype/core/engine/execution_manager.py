@@ -350,7 +350,6 @@ class ExecutionManager:
             # Only copy data that's explicitly needed for this iteration
             for comp_name in iteration_scope:
                 if comp_name in component_outputs:
-                    # Deep copy only the outputs we need
                     iteration_outputs[comp_name] = copy.deepcopy(component_outputs[comp_name])
             
             # Initialize edge counts only for iteration scope
@@ -364,6 +363,9 @@ class ExecutionManager:
                 forEach_result = await self._execute_component_with_buffered_store(
                     forEach_component, context, inputs, buffered_store
                 )
+                
+                # Add forEach component tokens to fired_tokens
+                fired_tokens.update(forEach_result.tokens_generated)
                 
                 if not forEach_result.success:
                     break
@@ -389,6 +391,9 @@ class ExecutionManager:
                         result = await self._execute_component_with_buffered_store(
                             component_name, context, inputs, buffered_store
                         )
+                        
+                        # FIX: Add iteration scope component tokens to fired_tokens
+                        fired_tokens.update(result.tokens_generated)
                         
                         if result.success:
                             iteration_outputs[component_name] = result.outputs
@@ -896,24 +901,23 @@ class ExecutionManager:
         import json
         import hashlib
         
-        #  Stable JSON-based cache key
+        # Stable JSON-based cache key
         try:
             config_json = json.dumps(resolved_config, sort_keys=True, default=str)
             config_hash = hashlib.blake2s(config_json.encode('utf-8'), digest_size=8).hexdigest()
             cache_key = f"{component_name}_{config_hash}"
         except (TypeError, ValueError) as e:
-            # Fallback for non-serializable configs
             self.logger.warning("CACHE_KEY_FALLBACK", extra={"component": component_name, "error": str(e)})
             cache_key = f"{component_name}_fallback_{id(resolved_config)}"
         
         with self._cache_lock:
             if cache_key in self._component_cache:
-                #  Update access time AFTER cache hit check
                 self._cache_access_times[cache_key] = time.time()
                 return self._component_cache[cache_key]
             
             # Clean up cache if it's getting too large
             self._cleanup_component_cache_locked()
+            #  Cleanup now happens safely within the lock context
         
         # Create component outside of lock to minimize lock time
         component = self._create_component_instance(component_name, resolved_config, store)
@@ -966,7 +970,7 @@ class ExecutionManager:
         # Remove oldest 25% of cached items
         items_to_remove = len(sorted_items) // 4
         
-        # Collect components to cleanup BEFORE releasing lock
+        # Collect components to cleanup and remove from cache
         components_to_cleanup = []
         
         for cache_key, _ in sorted_items[:items_to_remove]:
@@ -975,24 +979,9 @@ class ExecutionManager:
                 del self._component_cache[cache_key]
                 del self._cache_access_times[cache_key]
         
-        # Release lock before calling cleanup methods
-        cache_lock = self._cache_lock
-        cache_lock.release()
-        
-        try:
-            #  Call cleanup outside of lock to prevent deadlock
-            for cache_key, component in components_to_cleanup:
-                if hasattr(component, 'cleanup') and callable(component.cleanup):
-                    try:
-                        component.cleanup({})
-                    except Exception as e:
-                        self.logger.warning(
-                            "COMPONENT_CLEANUP_ERROR",
-                            extra={"cache_key": cache_key, "error": str(e)}
-                        )
-        finally:
-            # Re-acquire lock
-            cache_lock.acquire()
+        # FIX: Call separate method to handle cleanup outside lock
+        if components_to_cleanup:
+            self._cleanup_components_outside_lock(components_to_cleanup)
         
         self.logger.debug(
             "COMPONENT_CACHE_CLEANUP",
@@ -1001,6 +990,18 @@ class ExecutionManager:
                 "remaining_items": len(self._component_cache)
             }
         )
+
+    def _cleanup_components_outside_lock(self, components_to_cleanup: List[Tuple[str, BaseComponent]]) -> None:
+        """Cleanup components outside of cache lock to prevent deadlock."""
+        for cache_key, component in components_to_cleanup:
+            if hasattr(component, 'cleanup') and callable(component.cleanup):
+                try:
+                    component.cleanup({})
+                except Exception as e:
+                    self.logger.warning(
+                        "COMPONENT_CLEANUP_ERROR",
+                        extra={"cache_key": cache_key, "error": str(e)}
+                    )
 
     def cleanup_execution_manager(self) -> None:
         """Thread-safe cleanup of all cached components and resources."""
