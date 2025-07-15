@@ -537,41 +537,32 @@ class ExecutionManager:
                 "MEMORY_FREED",
                 extra={"freed_edges": freed_edges, "consumer": component_name}
             )
-    #dependancy token generation
-    def _generate_completion_tokens(
-        self,
-        component_name: str,
-        success: bool,
-        context: Dict[str, Any],
-    ) -> List[str]:
+    
+    def _generate_completion_tokens(self, component_name: str, success: bool, context: Dict[str, Any]) -> List[str]:
         """
         Emit dependency tokens for the orchestrator.
-
         * always "comp::ok" or "comp::error"
         * on success, additionally evaluate every IF-edge attached to the
-          component (any number, any order).  Metadata is provided by the
-          planner and stored under  node_metadata[comp]['if_edges']:
+          component (any number, any order). Metadata is provided by the
+          planner and stored under node_metadata[comp]['if_edges']:
               [{'trigger': 'if1', 'condition': '<expr>'}, …]
-
         The expression language:
-          • can reference any key in *context* directly, e.g.  attempt == 1
-          • can reference globals via  globals["row_count"]
+          • can reference any key in *context* directly, e.g. attempt == 1
+          • can reference globals via globals["row_count"]
           • admits only boolean / comparison operators (see _safe_eval_bool)
         """
         tokens: List[str] = [f"{component_name}::{'ok' if success else 'error'}"]
-
         if success:
             if_edges = self.node_metadata[component_name].get("if_edges", [])
             if if_edges:
                 # point-in-time snapshot of the GlobalStore
-                globals_snapshot = self.global_store.dump_snapshot()  # cheap, lock-free
+                globals_snapshot = self._dump_globals_snapshot()  # cheap, lock-free
                 env = {**context, "globals": globals_snapshot}
-
                 for edge in if_edges:
                     trig = edge["trigger"]          # "if1", "if2", …
                     cond = edge["condition"]
                     try:
-                        if _safe_eval_bool(cond, env):
+                        if self._safe_eval_bool(cond, env):
                             tokens.append(f"{component_name}::{trig}")
                     except ValueError as exc:
                         # Broken condition => log & skip, never crash engine
@@ -584,7 +575,6 @@ class ExecutionManager:
                                 "error": str(exc),
                             },
                         )
-
         return tokens
     
     async def _handle_component_error(self, component_name: str, error: Exception, 
@@ -644,6 +634,116 @@ class ExecutionManager:
         except Exception as e:
             self.logger.debug("GC_CHECK_FAILED", extra={"error": str(e)})
     
+    def _dump_globals_snapshot(self) -> Dict[str, Any]:
+        """Get point-in-time snapshot of GlobalStore for condition evaluation."""
+        try:
+            # Use GlobalStore's existing dump mechanism for consistency
+            dump_data = self.global_store.dump()
+            import json
+            state = json.loads(dump_data.decode('utf-8'))
+            return state.get("data", {})
+        except Exception as e:
+            self.logger.warning(
+                "GLOBALS_SNAPSHOT_FAILED",
+                extra={"error": str(e), "fallback": "empty_dict"}
+            )
+            return {}
+    
+    def _safe_eval_bool(self, condition: str, env: Dict[str, Any]) -> bool:
+        """
+        Safe boolean expression evaluation with restricted operators.
+        
+        Supports:
+        - Boolean operators: and, or, not
+        - Comparison operators: ==, !=, <, <=, >, >=
+        - Context variables and globals["key"] access
+        - Numeric and string literals
+        
+        Args:
+            condition: Boolean expression string
+            env: Environment with context and globals
+            
+        Returns:
+            Boolean result of expression
+            
+        Raises:
+            ValueError: If expression is invalid or unsafe
+        """
+        import ast
+        import operator
+        
+        # Allowed operations for safety
+        allowed_ops = {
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+            ast.Lt: operator.lt,
+            ast.LtE: operator.le,
+            ast.Gt: operator.gt,
+            ast.GtE: operator.ge,
+            ast.And: operator.and_,
+            ast.Or: operator.or_,
+            ast.Not: operator.not_,
+            ast.Is: operator.is_,
+            ast.IsNot: operator.is_not,
+            ast.In: lambda x, y: x in y,
+            ast.NotIn: lambda x, y: x not in y,
+        }
+        
+        def eval_node(node):
+            if isinstance(node, ast.Constant):
+                return node.value
+            elif isinstance(node, ast.Num):  # Python < 3.8 compatibility
+                return node.n
+            elif isinstance(node, ast.Str):  # Python < 3.8 compatibility
+                return node.s
+            elif isinstance(node, ast.Name):
+                if node.id in env:
+                    return env[node.id]
+                else:
+                    raise ValueError(f"Unknown variable: {node.id}")
+            elif isinstance(node, ast.Subscript):
+                # Handle globals["key"] access
+                value = eval_node(node.value)
+                slice_val = eval_node(node.slice) if hasattr(node.slice, 'value') else eval_node(node.slice.value)
+                return value[slice_val]
+            elif isinstance(node, ast.Compare):
+                left = eval_node(node.left)
+                for op, right in zip(node.ops, node.comparators):
+                    if type(op) not in allowed_ops:
+                        raise ValueError(f"Unsupported operator: {type(op).__name__}")
+                    right_val = eval_node(right)
+                    if not allowed_ops[type(op)](left, right_val):
+                        return False
+                    left = right_val
+                return True
+            elif isinstance(node, ast.BoolOp):
+                if type(node.op) not in allowed_ops:
+                    raise ValueError(f"Unsupported boolean operator: {type(node.op).__name__}")
+                op_func = allowed_ops[type(node.op)]
+                if isinstance(node.op, ast.And):
+                    return all(eval_node(val) for val in node.values)
+                elif isinstance(node.op, ast.Or):
+                    return any(eval_node(val) for val in node.values)
+            elif isinstance(node, ast.UnaryOp):
+                if type(node.op) not in allowed_ops:
+                    raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
+                return allowed_ops[type(node.op)](eval_node(node.operand))
+            else:
+                raise ValueError(f"Unsupported AST node: {type(node).__name__}")
+        
+        try:
+            # Parse the condition into AST
+            tree = ast.parse(condition, mode='eval')
+            result = eval_node(tree.body)
+            
+            # Ensure result is boolean
+            if not isinstance(result, bool):
+                raise ValueError(f"Condition must evaluate to boolean, got {type(result).__name__}")
+            
+            return result
+            
+        except SyntaxError as e:
+            raise ValueError(f"Invalid syntax in condition: {e}")
     def _cleanup_subjob_memory(self, component_outputs: Dict[str, Dict[str, Any]], subjob_id: str) -> None:
         """Clean up subjob memory and force garbage collection."""
         # Clear all component outputs
