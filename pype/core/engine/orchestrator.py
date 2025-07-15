@@ -16,7 +16,7 @@ from typing import Dict, Any, List, Set, Optional, Tuple
 from pype.core.engine.execution_manager import ExecutionManager, ComponentResult, ExecutionError
 from pype.core.engine.global_store import GlobalStore
 from pype.core.engine.subjob_tracker import SubJobTracker, ComponentState
-from pype.core.engine.templater import RuntimeTemplater
+from pype.core.engine.templater import RuntimeTemplater, MissingGlobalVar
 from pype.core.engine.job_config_handler import JobConfigHandler
 
 
@@ -164,7 +164,8 @@ class JobOrchestrator:
             execution_metadata=self.execution_metadata,
             global_store=self.global_store,
             threadpool=self.job_config_handler.get_threadpool(),
-            logger=self.logger
+            logger=self.logger,
+            job_folder=self.job_folder
         )
         
         # Initialize SubJobTrackers
@@ -308,7 +309,31 @@ class JobOrchestrator:
             self.completed_subjobs.add(subjob_id)
             
         except ExecutionError as e:
-            # Handle component execution error
+            # Handle component execution error (including MissingGlobalVar)
+            if isinstance(e.original_error, MissingGlobalVar):
+                # Specific handling for missing global variables
+                self.logger.error(
+                    "MISSING_GLOBAL_VARIABLE",
+                    extra={
+                        "subjob_id": subjob_id,
+                        "component": e.component,
+                        "global_key": e.original_error.global_key,
+                        "error_type": "MissingGlobalVar"
+                    }
+                )
+            else:
+                # General component error logging
+                self.logger.error(
+                    "COMPONENT_EXECUTION_ERROR",
+                    extra={
+                        "subjob_id": subjob_id,
+                        "component": e.component,
+                        "error": str(e.original_error or e),
+                        "error_type": type(e.original_error or e).__name__
+                    }
+                )
+            
+            # Generate component error tokens
             component_error_tokens = await self._handle_execution_error(subjob_id, e)
             
             # Check if component error is handled by downstream subjobs
@@ -343,11 +368,22 @@ class JobOrchestrator:
                     self.fired_tokens.update(component_error_tokens)  # Also fire component error
                 else:
                     # No subjob error handler - propagate error to stop job
-                    raise OrchestrationError(
-                        f"Unhandled subjob error in {subjob_id}: {e}",
-                        subjob_id=subjob_id,
-                        component=e.component
-                    )
+                    if isinstance(e.original_error, MissingGlobalVar):
+                        # Special message for missing global variables
+                        raise OrchestrationError(
+                            f"Critical error: Missing global variable '{e.original_error.global_key}' "
+                            f"in component '{e.component}' of subjob '{subjob_id}'. "
+                            f"This indicates a dependency issue in job execution order.",
+                            subjob_id=subjob_id,
+                            component=e.component
+                        )
+                    else:
+                        # General unhandled subjob error
+                        raise OrchestrationError(
+                            f"Unhandled subjob error in {subjob_id}: {e}",
+                            subjob_id=subjob_id,
+                            component=e.component
+                        )
         
         except Exception as e:
             # Unexpected error
@@ -356,6 +392,10 @@ class JobOrchestrator:
                 f"Unexpected error in subjob {subjob_id}: {e}",
                 subjob_id=subjob_id
             )
+        
+        finally:
+            # Ensure subjob is removed from running set regardless of outcome
+            self.running_subjobs.discard(subjob_id)
     
     async def _handle_execution_error(self, subjob_id: str, error: ExecutionError) -> List[str]:
         """
@@ -401,6 +441,7 @@ class JobOrchestrator:
                     "subjob_error_tokens": subjob_error_tokens
                 }
             )
+        return subjob_error_tokens
         
     def _has_error_handler(self, error_tokens: List[str]) -> bool:
         """Check if any subjob is waiting for the error tokens."""

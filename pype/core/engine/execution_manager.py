@@ -13,6 +13,7 @@ import importlib
 import time
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Any, Union, Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -772,6 +773,7 @@ class ExecutionManager:
             
         except SyntaxError as e:
             raise ValueError(f"Invalid syntax in condition: {e}")
+    
     def _cleanup_subjob_memory(self, component_outputs: Dict[str, Dict[str, Any]], subjob_id: str) -> None:
         """Clean up subjob memory and force garbage collection."""
         # Clear all component outputs
