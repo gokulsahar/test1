@@ -514,6 +514,9 @@ class BufferedStore:
         flush_errors = []
         
         with self._buffer_lock:
+            # Capture buffer size BEFORE any operations
+            original_buffer_size = len(self._buffer)
+            
             # Flush nested buffers first (inner to outer) with error handling
             for child_name, child_buffer in self._child_buffers.items():
                 try:
@@ -559,7 +562,7 @@ class BufferedStore:
                 extra={
                     "forEach_component": self.component_name,
                     "iteration": self._iteration_count,
-                    "variables_flushed": len(self._buffer),
+                    "variables_flushed": original_buffer_size,
                     "successful_sets": sum(results.values()),
                     "failed_sets": len(results) - sum(results.values()),
                     "flush_errors": len(flush_errors),
@@ -571,8 +574,8 @@ class BufferedStore:
             self._buffer.clear()
             self._is_flushed = True
             
-            # Raise error if critical flush failures occurred
-            if flush_errors and len(flush_errors) == len(self._buffer):
+            # Use original buffer size for critical failure check (FIXED BUG)
+            if flush_errors and len(flush_errors) == original_buffer_size:
                 raise GlobalStoreError(f"BufferedStore flush failed completely: {flush_errors[:3]}")
         
         return results
