@@ -68,6 +68,10 @@ class JobOrchestrator:
         self.completed_subjobs: Set[str] = set()
         self.failed_subjobs: Set[str] = set()
         
+        # Task management for subjob coordination
+        self.subjob_tasks: Dict[str, asyncio.Task] = {}
+        self.completion_queue: asyncio.Queue[str] = asyncio.Queue()
+        
         # Token dependency tracking for ready-queue algorithm
         self.subjob_waiting_tokens: Dict[str, Set[str]] = {}
         
@@ -275,7 +279,7 @@ class JobOrchestrator:
         return {'ready_queue_complete': True}
     
     async def _launch_subjob(self, subjob_id: str) -> None:
-        """Launch subjob execution as async task."""
+        """Launch subjob execution as async task with proper tracking."""
         self.running_subjobs.add(subjob_id)
         
         # Get context for this subjob
@@ -286,13 +290,47 @@ class JobOrchestrator:
             self._execute_subjob_with_error_handling(subjob_id, context)
         )
         
-        # Store task reference (in production, would use task management)
-        task.add_done_callback(lambda t: self._on_subjob_task_complete(subjob_id, t))
+        # Store task reference for lifecycle management
+        self.subjob_tasks[subjob_id] = task
+        
+        # Register completion callback with captured subjob_id
+        task.add_done_callback(
+            lambda t, sid=subjob_id: asyncio.create_task(self._on_subjob_done(sid, t))
+        )
         
         self.logger.info(
             "SUBJOB_LAUNCHED",
             extra={"subjob_id": subjob_id, "running_subjobs": len(self.running_subjobs)}
         )
+    
+    async def _on_subjob_done(self, subjob_id: str, task: asyncio.Task) -> None:
+        """Handle subjob task completion with proper resource cleanup."""
+        try:
+            # Retrieve result to silence "Task exception was never retrieved" warning
+            _ = task.result()
+            
+            self.logger.debug(
+                "SUBJOB_TASK_COMPLETED",
+                extra={"subjob_id": subjob_id, "success": True}
+            )
+            
+        except Exception as exc:
+            self.logger.error(
+                "SUBJOB_TASK_FAILED", 
+                extra={
+                    "subjob_id": subjob_id, 
+                    "error": str(exc),
+                    "error_type": type(exc).__name__
+                }
+            )
+        
+        finally:
+            # Clean up task reference
+            self.subjob_tasks.pop(subjob_id, None)
+            
+            # Notify completion queue (regardless of success/failure)
+            await self.completion_queue.put(subjob_id)
+    
     
     async def _execute_subjob_with_error_handling(self, subjob_id: str, context: Dict[str, Any]) -> None:
         """Execute subjob with comprehensive error handling."""
@@ -451,15 +489,7 @@ class JobOrchestrator:
     
     async def _wait_for_subjob_completion(self) -> str:
         """Wait for at least one subjob to complete and return its ID."""
-        # Simplified implementation - in production would use proper async coordination
-        # For now, simulate completion check
-        await asyncio.sleep(0.1)
-        
-        # Return first running subjob (placeholder)
-        if self.running_subjobs:
-            return next(iter(self.running_subjobs))
-        
-        raise OrchestrationError("No running subjobs to wait for")
+        return await self.completion_queue.get()
     
     async def _process_subjob_completion(self, subjob_id: str) -> List[str]:
         """
@@ -530,15 +560,6 @@ class JobOrchestrator:
         
         return newly_ready
     
-    def _on_subjob_task_complete(self, subjob_id: str, task: asyncio.Task) -> None:
-        """Callback when subjob async task completes."""
-        try:
-            task.result()  # This will raise exception if task failed
-        except Exception as e:
-            self.logger.error(
-                "SUBJOB_TASK_FAILED",
-                extra={"subjob_id": subjob_id, "error": str(e)}
-            )
     
     async def _handle_resume_if_needed(self) -> None:
         """Handle job resume from checkpoint if needed."""
@@ -565,11 +586,20 @@ class JobOrchestrator:
     
     async def _cleanup_failed_execution(self) -> None:
         """Cleanup after failed job execution."""
+        # Cancel any running subjob tasks
+        for subjob_id, task in self.subjob_tasks.items():
+            if not task.done():
+                task.cancel()
+                self.logger.debug(
+                    "SUBJOB_TASK_CANCELLED",
+                    extra={"subjob_id": subjob_id}
+                )
+        
+        # Clear task references
+        self.subjob_tasks.clear()
+        
         if self.job_config_handler:
             self.job_config_handler.shutdown()
-        
-        # Cancel any running subjob tasks
-        # In production, would properly cancel async tasks
         
         self.logger.error(
             "JOB_EXECUTION_CLEANUP",
