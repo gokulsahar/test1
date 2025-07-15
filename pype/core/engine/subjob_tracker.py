@@ -45,6 +45,10 @@ class SubJobTracker:
     
     def __post_init__(self):
         """Initialize component states and counts."""
+        # Convert list to set if needed
+        if isinstance(self.components, list):
+            self.components = set(self.components)
+        
         self.total_components = len(self.components)
         
         # Initialize all components as WAITING
@@ -61,7 +65,7 @@ class SubJobTracker:
                     "fail_strategy": self.fail_strategy
                 }
             )
-    
+        
     def notify_component_start(self, component: str) -> None:
         """
         Notify that a component has started execution.
@@ -325,3 +329,22 @@ class SubJobTracker:
         """Get set of components that succeeded."""
         return {comp for comp, state in self.component_states.items() 
                 if state == ComponentState.SUCCEEDED}
+        
+        
+        
+    def notify(self, component: str, state: ComponentState) -> None:
+        """
+        Generic notify method for state changes.
+        
+        Args:
+            component: Component name
+            state: New component state
+        """
+        if state == ComponentState.RUNNING:
+            self.notify_component_start(component)
+        elif state == ComponentState.SUCCEEDED:
+            self.notify_component_success(component)
+        elif state == ComponentState.FAILED:
+            self.notify_component_failure(component)
+        elif state == ComponentState.SKIPPED:
+            self.notify_component_skipped(component)

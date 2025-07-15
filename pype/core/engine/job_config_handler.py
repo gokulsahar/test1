@@ -88,6 +88,11 @@ class JobConfigHandler:
             }
         )
     
+    def get_execution_mode(self) -> str:
+        """Get job execution mode (pandas or dask)."""
+        return self.job_config.get('execution_mode', 'pandas')
+
+    
     def _validate_configuration(self) -> None:
         """Validate job configuration with extensible validation methods."""
         validation_errors = []
@@ -398,6 +403,18 @@ class JobConfigHandler:
     def shutdown(self) -> None:
         """Clean up resources - threadpool and dask client."""
         shutdown_events = []
+        
+            # Shutdown ExecutionManager first
+        if hasattr(self, 'execution_manager') and self.execution_manager:
+            try:
+                self.execution_manager.cleanup_execution_manager()
+                shutdown_events.append("execution_manager_cleanup")
+            except Exception as e:
+                self.logger.error(
+                    "EXECUTION_MANAGER_CLEANUP_ERROR",
+                    extra={"run_id": self.run_id, "error": str(e)}
+                )
+            
         
         # Shutdown threadpool
         if self._threadpool:

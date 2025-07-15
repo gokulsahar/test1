@@ -7,6 +7,7 @@ and forEach iteration with proper BufferedStore integration.
 
 import asyncio
 import gc
+import threading
 import os
 import psutil
 import importlib
@@ -92,6 +93,13 @@ class ExecutionManager:
         
         # Memory management state
         self._init_memory_management()
+        
+        # Component instance cache with size limit
+        self._component_cache: Dict[str, BaseComponent] = {}
+        self._cache_access_times: Dict[str, float] = {}  # Track access times for LRU
+        self._max_cache_size = 100  # Configurable cache size limit
+        self._cache_lock = threading.RLock()
+        
         
         # Safety limits
         self.max_iterations = 10000  # Prevent infinite forEach loops
@@ -209,8 +217,73 @@ class ExecutionManager:
                     subjob_tracker.notify(component_name, ComponentState.FAILED)
                     # Handle error flow - abort subjob immediately
                     await self._handle_component_error(component_name, result.error, subjob_tracker)
-                
+            
+            # Specific exception handling by category
+            except MissingGlobalVar as e:
+                self.logger.error(
+                    "MISSING_GLOBAL_VARIABLE",
+                    extra={
+                        "component": component_name,
+                        "subjob_id": subjob_id,
+                        "global_key": e.global_key,
+                        "error_type": "MissingGlobalVar"
+                    }
+                )
+                subjob_tracker.notify(component_name, ComponentState.FAILED)
+                await self._handle_component_error(component_name, e, subjob_tracker)
+            
+            except ImportError as e:
+                self.logger.error(
+                    "COMPONENT_IMPORT_ERROR",
+                    extra={
+                        "component": component_name,
+                        "subjob_id": subjob_id,
+                        "error": str(e),
+                        "error_type": "ImportError"
+                    }
+                )
+                subjob_tracker.notify(component_name, ComponentState.FAILED)
+                await self._handle_component_error(component_name, e, subjob_tracker)
+            
+            except MemoryError as e:
+                self.logger.error(
+                    "COMPONENT_MEMORY_ERROR",
+                    extra={
+                        "component": component_name,
+                        "subjob_id": subjob_id,
+                        "error": str(e),
+                        "error_type": "MemoryError"
+                    }
+                )
+                # Force garbage collection on memory error
+                self._maybe_collect_garbage("memory_error")
+                subjob_tracker.notify(component_name, ComponentState.FAILED)
+                await self._handle_component_error(component_name, e, subjob_tracker)
+            
+            except asyncio.TimeoutError as e:
+                self.logger.error(
+                    "COMPONENT_TIMEOUT_ERROR",
+                    extra={
+                        "component": component_name,
+                        "subjob_id": subjob_id,
+                        "error": str(e),
+                        "error_type": "TimeoutError"
+                    }
+                )
+                subjob_tracker.notify(component_name, ComponentState.FAILED)
+                await self._handle_component_error(component_name, e, subjob_tracker)
+            
             except Exception as e:
+                # Catch-all for unexpected errors
+                self.logger.error(
+                    "COMPONENT_UNEXPECTED_ERROR",
+                    extra={
+                        "component": component_name,
+                        "subjob_id": subjob_id,
+                        "error": str(e),
+                        "error_type": type(e).__name__
+                    }
+                )
                 subjob_tracker.notify(component_name, ComponentState.FAILED)
                 await self._handle_component_error(component_name, e, subjob_tracker)
             
@@ -347,7 +420,7 @@ class ExecutionManager:
         data_available = all(
             source_comp in component_outputs and 
             any(port_name in component_outputs[source_comp] for port_name, _ in inputs)
-            for port_name, source_comp in inputs
+            for _, source_comp in inputs
         )
         
         return data_ready and control_ready and data_available
@@ -484,41 +557,7 @@ class ExecutionManager:
                 tokens_generated=tokens_generated
             )
     
-    def _get_component_instance(self, component_name: str, resolved_config: Dict[str, Any], 
-                              store: Union[GlobalStore, BufferedStore]) -> BaseComponent:
-        """Get or create component instance with lazy loading and resolved config."""
-        # Create cache key that includes resolved config hash for cache invalidation
-        config_hash = hash(str(sorted(resolved_config.items())))
-        cache_key = f"{component_name}_{config_hash}"
-        
-        if cache_key in self._component_cache:
-            return self._component_cache[cache_key]
-        
-        # Get component metadata
-        metadata = self.node_metadata[component_name]
-        registry_metadata = metadata['registry_metadata']
-        
-        # Import component class
-        module_path = registry_metadata['module_path']
-        class_name = registry_metadata['class_name']
-        
-        try:
-            module = importlib.import_module(module_path)
-            component_class = getattr(module, class_name)
-            
-            # Create instance with resolved config
-            component = component_class(
-                name=component_name,
-                config=resolved_config,  # Pass resolved config
-                global_store=store
-            )
-            
-            # Cache for reuse (with config-specific key)
-            self._component_cache[cache_key] = component
-            return component
-            
-        except Exception as e:
-            raise ExecutionError(component_name, f"Failed to instantiate component: {e}", e)
+    
     
     def _init_edge_reference_counts(self, component_execution_order: List[str]) -> Dict[str, int]:
         """Initialize edge reference counts for memory management."""
@@ -616,7 +655,7 @@ class ExecutionManager:
         - Let orchestrator handle error token dispatch
         """
         # Mark subjob as failed to abort remaining components
-        subjob_tracker.failed = True
+        subjob_tracker.notify_component_failure(component_name, "execution_error")
         
         # Raise error to stop current subjob execution
         # Orchestrator will handle error token generation and clearing
@@ -731,9 +770,14 @@ class ExecutionManager:
                 else:
                     raise ValueError(f"Unknown variable: {node.id}")
             elif isinstance(node, ast.Subscript):
-                # Handle globals["key"] access
                 value = eval_node(node.value)
-                slice_val = eval_node(node.slice) if hasattr(node.slice, 'value') else eval_node(node.slice.value)
+                # Handle different Python versions safely
+                if hasattr(node.slice, 'value'):
+                    slice_val = eval_node(node.slice.value)
+                elif hasattr(node, 'slice') and hasattr(node.slice, 'id'):
+                    slice_val = node.slice.id
+                else:
+                    slice_val = eval_node(node.slice)
                 return value[slice_val]
             elif isinstance(node, ast.Compare):
                 left = eval_node(node.left)
@@ -786,3 +830,117 @@ class ExecutionManager:
             "SUBJOB_MEMORY_CLEANUP",
             extra={"subjob_id": subjob_id, "gc_forced": True}
         )
+        
+        
+
+        
+        
+    def _get_component_instance(self, component_name: str, resolved_config: Dict[str, Any], 
+                              store: Union[GlobalStore, BufferedStore]) -> BaseComponent:
+        """Thread-safe component instance retrieval with cache management."""
+        # Create cache key that includes resolved config hash for cache invalidation
+        config_hash = hash(str(sorted(resolved_config.items())))
+        cache_key = f"{component_name}_{config_hash}"
+        
+        with self._cache_lock:
+            # Update access time for LRU
+            current_time = time.time()
+            self._cache_access_times[cache_key] = current_time
+            
+            if cache_key in self._component_cache:
+                return self._component_cache[cache_key]
+            
+            # Clean up cache if it's getting too large
+            self._cleanup_component_cache_locked()
+        
+        # Create component outside of lock to minimize lock time
+        component = self._create_component_instance(component_name, resolved_config, store)
+        
+        # Store in cache with lock
+        with self._cache_lock:
+            self._component_cache[cache_key] = component
+        
+        return component
+
+    def _create_component_instance(self, component_name: str, resolved_config: Dict[str, Any], 
+                                store: Union[GlobalStore, BufferedStore]) -> BaseComponent:
+        """Create new component instance (called outside of lock)."""
+        # Get component metadata
+        metadata = self.node_metadata[component_name]
+        registry_metadata = metadata['registry_metadata']
+        
+        # Import component class
+        module_path = registry_metadata['module_path']
+        class_name = registry_metadata['class_name']
+        
+        try:
+            module = importlib.import_module(module_path)
+            component_class = getattr(module, class_name)
+            
+            # Create instance with resolved config
+            component = component_class(
+                name=component_name,
+                config=resolved_config,
+                global_store=store
+            )
+            
+            return component
+            
+        except Exception as e:
+            raise ExecutionError(component_name, f"Failed to instantiate component: {e}", e)
+
+    def _cleanup_component_cache_locked(self) -> None:
+        """Thread-safe component cache cleanup (must be called within lock)."""
+        if len(self._component_cache) <= self._max_cache_size:
+            return
+        
+        # Sort by access time (LRU first)
+        sorted_items = sorted(
+            self._cache_access_times.items(), 
+            key=lambda x: x[1]
+        )
+        
+        # Remove oldest 25% of cached items
+        items_to_remove = len(sorted_items) // 4
+        
+        for cache_key, _ in sorted_items[:items_to_remove]:
+            if cache_key in self._component_cache:
+                # Cleanup component if it has cleanup method
+                component = self._component_cache[cache_key]
+                if hasattr(component, 'cleanup') and callable(component.cleanup):
+                    try:
+                        component.cleanup({})
+                    except Exception as e:
+                        self.logger.warning(
+                            "COMPONENT_CLEANUP_ERROR",
+                            extra={"cache_key": cache_key, "error": str(e)}
+                        )
+                
+                del self._component_cache[cache_key]
+                del self._cache_access_times[cache_key]
+        
+        self.logger.debug(
+            "COMPONENT_CACHE_CLEANUP",
+            extra={
+                "removed_items": items_to_remove,
+                "remaining_items": len(self._component_cache)
+            }
+        )
+
+    def cleanup_execution_manager(self) -> None:
+        """Thread-safe cleanup of all cached components and resources."""
+        with self._cache_lock:
+            for cache_key, component in self._component_cache.items():
+                if hasattr(component, 'cleanup') and callable(component.cleanup):
+                    try:
+                        component.cleanup({})
+                    except Exception as e:
+                        self.logger.warning(
+                            "COMPONENT_CLEANUP_ERROR",
+                            extra={"cache_key": cache_key, "error": str(e)}
+                        )
+            
+            self._component_cache.clear()
+            self._cache_access_times.clear()
+        
+        self.logger.info("EXECUTION_MANAGER_CLEANUP_COMPLETE")

@@ -245,6 +245,17 @@ class BufferedStore:
         self._parent_buffer: Optional['BufferedStore'] = None
         self._child_buffers: Dict[str, 'BufferedStore'] = {}
     
+    def end_iteration(self) -> None:
+        """End current forEach iteration context."""
+        self.logger.debug(
+            "FOREACH_ITERATION_END",
+            extra={
+                "forEach_component": self.component_name,
+                "iteration": self._iteration_count
+            }
+        )
+        
+    
     def get(self, key: str, default: Any = None) -> Any:
         """
         Get value from buffer first, then fallback to GlobalStore.

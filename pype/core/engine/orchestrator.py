@@ -208,14 +208,12 @@ class JobOrchestrator:
         for subjob_id, components in self.subjob_components.items():
             self.subjob_trackers[subjob_id] = SubJobTracker(
                 subjob_id=subjob_id,
-                total_tasks=len(components),
+                components=set(components),  # Convert to set
                 fail_strategy=fail_strategy,
                 logger=self.logger
             )
             
-            # Initialize all components as WAITING
-            for component in components:
-                self.subjob_trackers[subjob_id].notify(component, ComponentState.WAITING)
+        
     
     def _initialize_ready_queue(self) -> None:
         """Initialize ready queue with subjobs that have no dependencies."""
@@ -550,6 +548,10 @@ class JobOrchestrator:
     
     async def _cleanup_successful_execution(self) -> None:
         """Cleanup after successful job execution."""
+        # Clean up ExecutionManager
+        if self.execution_manager:
+            self.execution_manager.cleanup_execution_manager()
+        
         if self.job_config_handler:
             self.job_config_handler.shutdown()
         
