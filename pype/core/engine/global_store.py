@@ -71,12 +71,16 @@ class GlobalStore:
         Returns:
             True if value was set, False if key already exists (immutable)
         """
+        # Deep copy on write to prevent mutation
+        import copy
+        safe_value = copy.deepcopy(value) if isinstance(value, (dict, list, set)) else value
+        
         # Fine-grained locking per key for optimal concurrency
         with self._locks[key]:
             if key in self._data:
-                if mode == "accumulate" and isinstance(self._data[key], list) and isinstance(value, list):
-                    # Special case: accumulate lists
-                    self._data[key].extend(value)
+                if mode == "accumulate" and isinstance(self._data[key], list) and isinstance(safe_value, list):
+                    # Special case: accumulate lists (create new list, don't mutate)
+                    self._data[key] = self._data[key] + safe_value
                 else:
                     # Immutable global exists - reject
                     self.logger.warning(
@@ -90,12 +94,12 @@ class GlobalStore:
                     )
                     return False
             else:
-                # New key - store value
-                self._data[key] = value
+                # New key - store safe copy
+                self._data[key] = safe_value
             
             # Validate value size (warn only, don't reject per spec)
             try:
-                serialized_size = len(json.dumps(value).encode('utf-8'))
+                serialized_size = len(json.dumps(safe_value).encode('utf-8'))
                 if serialized_size > 65536:  # 64KB
                     self.logger.warning(
                         "GLOBAL_SET_SIZE_WARNING",
@@ -127,9 +131,9 @@ class GlobalStore:
                 extra={
                     "key": key,
                     "component": component,
-                    "value": value,
+                    "value": safe_value,
                     "revision": current_revision,
-                    "value_type": type(value).__name__,
+                    "value_type": type(safe_value).__name__,
                     "mode": mode
                 }
             )
@@ -258,26 +262,32 @@ class BufferedStore:
     
     def get(self, key: str, default: Any = None) -> Any:
         """
-        Get value from buffer first, then fallback to GlobalStore.
+        Get global variable value (thread-safe with selective locking).
         
         Args:
-            key: Global variable key
+            key: Global variable key (component_name__variable_name format)
             default: Default value if key not found
             
         Returns:
-            Value from buffer or GlobalStore
+            Deep copy of stored value or default
         """
-        with self._buffer_lock:
-            if key in self._buffer:
-                # Return from buffer with deep copy
-                value = self._buffer[key]
-                if isinstance(value, (dict, list)):
+        # Quick check without lock for non-existent keys
+        if key not in self._data:
+            return default
+        
+        # For mutable objects, acquire lock to prevent race with accumulate mode
+        value = self._data[key]
+        if isinstance(value, (dict, list)):
+            with self._locks[key]:
+                # Re-check after acquiring lock (double-checked locking pattern)
+                value = self._data.get(key, default)
+                if value is not None and isinstance(value, (dict, list)):
                     import copy
                     return copy.deepcopy(value)
                 return value
-        
-        # Fallback to GlobalStore
-        return self.global_store.get(key, default)
+        else:
+            # Immutable types (int, str, float, bool, None) are safe to return directly
+            return value
     
     def set(self, key: str, value: Any, component: str = "forEach_component", mode: str = "replace") -> bool:
         """
@@ -377,6 +387,9 @@ class BufferedStore:
             iteration_data: Optional iteration context data
         """
         with self._buffer_lock:
+            # Clear any stale buffer from previous failed iterations
+            self._buffer.clear()
+            
             self._iteration_count += 1
             self._is_flushed = False
             
@@ -385,7 +398,8 @@ class BufferedStore:
                 extra={
                     "forEach_component": self.component_name,
                     "iteration": self._iteration_count,
-                    "context_keys": list(iteration_data.keys()) if iteration_data else []
+                    "context_keys": list(iteration_data.keys()) if iteration_data else [],
+                    "buffer_cleared": True
                 }
             )
     
