@@ -404,18 +404,6 @@ class JobConfigHandler:
         """Clean up resources - threadpool and dask client."""
         shutdown_events = []
         
-            # Shutdown ExecutionManager first
-        if hasattr(self, 'execution_manager') and self.execution_manager:
-            try:
-                self.execution_manager.cleanup_execution_manager()
-                shutdown_events.append("execution_manager_cleanup")
-            except Exception as e:
-                self.logger.error(
-                    "EXECUTION_MANAGER_CLEANUP_ERROR",
-                    extra={"run_id": self.run_id, "error": str(e)}
-                )
-            
-        
         # Shutdown threadpool
         if self._threadpool:
             try:
