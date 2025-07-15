@@ -101,6 +101,10 @@ class ExecutionManager:
         self._cache_lock = threading.RLock()
         
         
+        self._globals_snapshot_cache = {}
+        self._globals_cache_revision = -1
+        
+        
         # Safety limits
         self.max_iterations = 10000  # Prevent infinite forEach loops
     
@@ -213,8 +217,14 @@ class ExecutionManager:
                     component_outputs[component_name] = result.outputs
                     self._update_edge_reference_counts(component_name, edge_remaining, component_outputs)
                     subjob_tracker.notify(component_name, ComponentState.SUCCEEDED)
+                    
+                    fired_tokens.update(result.tokens_generated)
+                    
                 else:
                     subjob_tracker.notify(component_name, ComponentState.FAILED)
+                    
+                    fired_tokens.update(result.tokens_generated)
+                    
                     # Handle error flow - abort subjob immediately
                     await self._handle_component_error(component_name, result.error, subjob_tracker)
             
@@ -315,11 +325,13 @@ class ExecutionManager:
         )
     
     async def _execute_forEach_iteration(self, forEach_component: str, iterator_metadata: Dict[str, Any],
-                                       component_execution_order: List[str], context: Dict[str, Any],
-                                       subjob_tracker: SubJobTracker, fired_tokens: set,
-                                       component_outputs: Dict[str, Dict[str, Any]],
-                                       edge_remaining: Dict[str, int]) -> None:
+                                    component_execution_order: List[str], context: Dict[str, Any],
+                                    subjob_tracker: SubJobTracker, fired_tokens: set,
+                                    component_outputs: Dict[str, Dict[str, Any]],
+                                    edge_remaining: Dict[str, int]) -> None:
         """Execute forEach component with recursive iteration support."""
+        import copy
+        
         iteration_count = 0
         forEach_metadata = iterator_metadata[forEach_component]
         iteration_scope = forEach_metadata.get('iteration_scope', [])
@@ -331,9 +343,20 @@ class ExecutionManager:
             # Start new iteration
             buffered_store.start_iteration({"iteration": iteration_count})
             
-            # Fresh component outputs for this iteration
-            iteration_outputs = component_outputs.copy()
-            iteration_edge_remaining = edge_remaining.copy()
+            # Create fresh isolated state for each iteration
+            iteration_outputs = {}
+            iteration_edge_remaining = {}
+            
+            # Only copy data that's explicitly needed for this iteration
+            for comp_name in iteration_scope:
+                if comp_name in component_outputs:
+                    # Deep copy only the outputs we need
+                    iteration_outputs[comp_name] = copy.deepcopy(component_outputs[comp_name])
+            
+            # Initialize edge counts only for iteration scope
+            for edge_id, count in edge_remaining.items():
+                if any(comp in edge_id for comp in iteration_scope):
+                    iteration_edge_remaining[edge_id] = count
             
             try:
                 # Execute forEach component to get next item
@@ -398,7 +421,7 @@ class ExecutionManager:
         )
     
     def _can_component_execute(self, component_name: str, component_outputs: Dict[str, Dict[str, Any]], 
-                             fired_tokens: set) -> bool:
+                            fired_tokens: set) -> bool:
         """
         Check if component can execute based on data and control dependencies.
         
@@ -414,13 +437,13 @@ class ExecutionManager:
         control_deps = deps['control']
         control_ready = all(f"{dep}::ok" in fired_tokens for dep in control_deps)
         
-        # Check actual data availability for input ports
         port_info = self.port_mapping[component_name]
         inputs = port_info['inputs']
+        
+        # Check that for each required input port, the source component has the output
         data_available = all(
-            source_comp in component_outputs and 
-            any(port_name in component_outputs[source_comp] for port_name, _ in inputs)
-            for _, source_comp in inputs
+            source_comp in component_outputs and port_name in component_outputs[source_comp]
+            for port_name, source_comp in inputs
         )
         
         return data_ready and control_ready and data_available
@@ -662,16 +685,29 @@ class ExecutionManager:
         raise ExecutionError(component_name, str(error), error)
     
     def _calculate_total_rows(self, outputs: Dict[str, Union[pd.DataFrame, dd.DataFrame]]) -> int:
-        """Calculate total row count across all output DataFrames."""
+        """Calculate total row count across all output DataFrames with safe Dask handling."""
         total_rows = 0
+        
         for df in outputs.values():
             if isinstance(df, pd.DataFrame):
                 total_rows += len(df)
             elif isinstance(df, dd.DataFrame):
+
                 try:
-                    total_rows += len(df)
-                except:
-                    total_rows += 0  # Unknown partition count
+                    # Only compute length if divisions are known (cheap operation)
+                    if df.known_divisions:
+                        df_len = len(df)
+                        # Soft cap to prevent massive computations
+                        if df_len < 1_000_000:  # 1M row soft limit
+                            total_rows += df_len
+                        else:
+                            total_rows += 0  # Skip expensive counts
+                    else:
+                        # Use npartitions as rough estimate when divisions unknown
+                        total_rows += df.npartitions * 1000  # Rough estimate
+                except Exception:
+                    total_rows += 0  # Fallback on any error
+        
         return total_rows
     
     def _find_root_forEach_component(self, iterator_components: Dict[str, Any]) -> Optional[str]:
@@ -691,25 +727,47 @@ class ExecutionManager:
             rss_delta = rss_now - self.rss_prev
             threshold_bytes = self.gc_threshold_mb << 20  # Convert MB to bytes
             
-            if rss_delta >= threshold_bytes and rss_now >= self.rss_soft_limit:
+            # Use OR logic instead of AND for GC triggers
+            should_gc = (rss_delta >= threshold_bytes) or (rss_now >= self.rss_soft_limit)
+            
+            if should_gc:
                 self.logger.debug(
                     "GC_TRIGGER",
-                    extra={"where": label, "rss_mb": rss_now >> 20, "delta_mb": rss_delta >> 20}
+                    extra={
+                        "where": label, 
+                        "rss_mb": rss_now >> 20, 
+                        "delta_mb": rss_delta >> 20,
+                        "trigger_reason": "delta" if rss_delta >= threshold_bytes else "soft_limit"
+                    }
                 )
                 gc.collect()
+                
+                # Always reset rss_prev after collection
                 self.rss_prev = process.memory_info().rss
                 
         except Exception as e:
             self.logger.debug("GC_CHECK_FAILED", extra={"error": str(e)})
     
     def _dump_globals_snapshot(self) -> Dict[str, Any]:
-        """Get point-in-time snapshot of GlobalStore for condition evaluation."""
+        """Get point-in-time snapshot of GlobalStore with caching for condition evaluation."""
         try:
-            # Use GlobalStore's existing dump mechanism for consistency
+            current_revision = self.global_store.revision()
+            
+            #  Cache snapshot based on revision
+            if current_revision == self._globals_cache_revision and self._globals_snapshot_cache:
+                return self._globals_snapshot_cache
+            
+            # Update cache
             dump_data = self.global_store.dump()
             import json
             state = json.loads(dump_data.decode('utf-8'))
-            return state.get("data", {})
+            snapshot = state.get("data", {})
+            
+            self._globals_snapshot_cache = snapshot
+            self._globals_cache_revision = current_revision
+            
+            return snapshot
+            
         except Exception as e:
             self.logger.warning(
                 "GLOBALS_SNAPSHOT_FAILED",
@@ -717,25 +775,9 @@ class ExecutionManager:
             )
             return {}
     
-    def _safe_eval_bool(self, condition: str, env: Dict[str, Any]) -> bool:
+    def _safe_eval_bool(self, condition: str, env: Dict[str, Any], max_depth: int = 10) -> bool:
         """
-        Safe boolean expression evaluation with restricted operators.
-        
-        Supports:
-        - Boolean operators: and, or, not
-        - Comparison operators: ==, !=, <, <=, >, >=
-        - Context variables and globals["key"] access
-        - Numeric and string literals
-        
-        Args:
-            condition: Boolean expression string
-            env: Environment with context and globals
-            
-        Returns:
-            Boolean result of expression
-            
-        Raises:
-            ValueError: If expression is invalid or unsafe
+        Safe boolean expression evaluation with restricted operators and depth limiting.
         """
         import ast
         import operator
@@ -757,7 +799,11 @@ class ExecutionManager:
             ast.NotIn: lambda x, y: x not in y,
         }
         
-        def eval_node(node):
+        def eval_node(node, depth=0):
+            #  Prevent infinite recursion
+            if depth > max_depth:
+                raise ValueError(f"Expression too deeply nested (max depth: {max_depth})")
+            
             if isinstance(node, ast.Constant):
                 return node.value
             elif isinstance(node, ast.Num):  # Python < 3.8 compatibility
@@ -770,21 +816,24 @@ class ExecutionManager:
                 else:
                     raise ValueError(f"Unknown variable: {node.id}")
             elif isinstance(node, ast.Subscript):
-                value = eval_node(node.value)
-                # Handle different Python versions safely
-                if hasattr(node.slice, 'value'):
-                    slice_val = eval_node(node.slice.value)
-                elif hasattr(node, 'slice') and hasattr(node.slice, 'id'):
-                    slice_val = node.slice.id
-                else:
-                    slice_val = eval_node(node.slice)
-                return value[slice_val]
+                try:
+                    value = eval_node(node.value, depth + 1)
+                    # Handle different Python versions safely
+                    if hasattr(node.slice, 'value'):
+                        slice_val = eval_node(node.slice.value, depth + 1)
+                    elif hasattr(node, 'slice') and hasattr(node.slice, 'id'):
+                        slice_val = node.slice.id
+                    else:
+                        slice_val = eval_node(node.slice, depth + 1)
+                    return value[slice_val]
+                except (KeyError, IndexError, TypeError) as e:
+                    raise ValueError(f"Subscript access failed: {e}")
             elif isinstance(node, ast.Compare):
-                left = eval_node(node.left)
+                left = eval_node(node.left, depth + 1)
                 for op, right in zip(node.ops, node.comparators):
                     if type(op) not in allowed_ops:
                         raise ValueError(f"Unsupported operator: {type(op).__name__}")
-                    right_val = eval_node(right)
+                    right_val = eval_node(right, depth + 1)
                     if not allowed_ops[type(op)](left, right_val):
                         return False
                     left = right_val
@@ -792,15 +841,14 @@ class ExecutionManager:
             elif isinstance(node, ast.BoolOp):
                 if type(node.op) not in allowed_ops:
                     raise ValueError(f"Unsupported boolean operator: {type(node.op).__name__}")
-                op_func = allowed_ops[type(node.op)]
                 if isinstance(node.op, ast.And):
-                    return all(eval_node(val) for val in node.values)
+                    return all(eval_node(val, depth + 1) for val in node.values)
                 elif isinstance(node.op, ast.Or):
-                    return any(eval_node(val) for val in node.values)
+                    return any(eval_node(val, depth + 1) for val in node.values)
             elif isinstance(node, ast.UnaryOp):
                 if type(node.op) not in allowed_ops:
                     raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
-                return allowed_ops[type(node.op)](eval_node(node.operand))
+                return allowed_ops[type(node.op)](eval_node(node.operand, depth + 1))
             else:
                 raise ValueError(f"Unsupported AST node: {type(node).__name__}")
         
@@ -817,6 +865,13 @@ class ExecutionManager:
             
         except SyntaxError as e:
             raise ValueError(f"Invalid syntax in condition: {e}")
+        except Exception as e:
+            #  Return False with warning instead of crashing on edge cases
+            self.logger.warning(
+                "SAFE_EVAL_FALLBACK",
+                extra={"condition": condition, "error": str(e)}
+            )
+            return False
     
     def _cleanup_subjob_memory(self, component_outputs: Dict[str, Dict[str, Any]], subjob_id: str) -> None:
         """Clean up subjob memory and force garbage collection."""
@@ -836,18 +891,25 @@ class ExecutionManager:
         
         
     def _get_component_instance(self, component_name: str, resolved_config: Dict[str, Any], 
-                              store: Union[GlobalStore, BufferedStore]) -> BaseComponent:
+                            store: Union[GlobalStore, BufferedStore]) -> BaseComponent:
         """Thread-safe component instance retrieval with cache management."""
-        # Create cache key that includes resolved config hash for cache invalidation
-        config_hash = hash(str(sorted(resolved_config.items())))
-        cache_key = f"{component_name}_{config_hash}"
+        import json
+        import hashlib
+        
+        #  Stable JSON-based cache key
+        try:
+            config_json = json.dumps(resolved_config, sort_keys=True, default=str)
+            config_hash = hashlib.blake2s(config_json.encode('utf-8'), digest_size=8).hexdigest()
+            cache_key = f"{component_name}_{config_hash}"
+        except (TypeError, ValueError) as e:
+            # Fallback for non-serializable configs
+            self.logger.warning("CACHE_KEY_FALLBACK", extra={"component": component_name, "error": str(e)})
+            cache_key = f"{component_name}_fallback_{id(resolved_config)}"
         
         with self._cache_lock:
-            # Update access time for LRU
-            current_time = time.time()
-            self._cache_access_times[cache_key] = current_time
-            
             if cache_key in self._component_cache:
+                #  Update access time AFTER cache hit check
+                self._cache_access_times[cache_key] = time.time()
                 return self._component_cache[cache_key]
             
             # Clean up cache if it's getting too large
@@ -859,6 +921,7 @@ class ExecutionManager:
         # Store in cache with lock
         with self._cache_lock:
             self._component_cache[cache_key] = component
+            self._cache_access_times[cache_key] = time.time()
         
         return component
 
@@ -903,10 +966,22 @@ class ExecutionManager:
         # Remove oldest 25% of cached items
         items_to_remove = len(sorted_items) // 4
         
+        # Collect components to cleanup BEFORE releasing lock
+        components_to_cleanup = []
+        
         for cache_key, _ in sorted_items[:items_to_remove]:
             if cache_key in self._component_cache:
-                # Cleanup component if it has cleanup method
-                component = self._component_cache[cache_key]
+                components_to_cleanup.append((cache_key, self._component_cache[cache_key]))
+                del self._component_cache[cache_key]
+                del self._cache_access_times[cache_key]
+        
+        # Release lock before calling cleanup methods
+        cache_lock = self._cache_lock
+        cache_lock.release()
+        
+        try:
+            #  Call cleanup outside of lock to prevent deadlock
+            for cache_key, component in components_to_cleanup:
                 if hasattr(component, 'cleanup') and callable(component.cleanup):
                     try:
                         component.cleanup({})
@@ -915,14 +990,14 @@ class ExecutionManager:
                             "COMPONENT_CLEANUP_ERROR",
                             extra={"cache_key": cache_key, "error": str(e)}
                         )
-                
-                del self._component_cache[cache_key]
-                del self._cache_access_times[cache_key]
+        finally:
+            # Re-acquire lock
+            cache_lock.acquire()
         
         self.logger.debug(
             "COMPONENT_CACHE_CLEANUP",
             extra={
-                "removed_items": items_to_remove,
+                "removed_items": len(components_to_cleanup),
                 "remaining_items": len(self._component_cache)
             }
         )

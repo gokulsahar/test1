@@ -37,12 +37,13 @@ class GlobalStore:
         self.logger = logger
         self._data: Dict[str, Any] = {}
         self._revision: int = 0
-        self._locks: Dict[str, threading.RLock] = defaultdict(threading.RLock)
+        self._locks: Dict[str, threading.RLock] = {}
         self._global_lock = threading.RLock()
+        self._last_cleanup = time.time()
         
     def get(self, key: str, default: Any = None) -> Any:
         """
-        Get global variable value (lock-free read).
+        Get global variable value (consistent deep-copy for thread safety).
         
         Args:
             key: Global variable key (component_name__variable_name format)
@@ -52,11 +53,7 @@ class GlobalStore:
             Deep copy of stored value or default
         """
         value = self._data.get(key, default)
-        # Return deep copy to prevent accidental mutations
-        if value is not None and isinstance(value, (dict, list)):
-            import copy
-            return copy.deepcopy(value)
-        return value
+        return self._safe_copy(value)
     
     def set(self, key: str, value: Any, component: str = "unknown", mode: str = "replace") -> bool:
         """
@@ -71,12 +68,23 @@ class GlobalStore:
         Returns:
             True if value was set, False if key already exists (immutable)
         """
-        # Deep copy on write to prevent mutation
-        import copy
-        safe_value = copy.deepcopy(value) if isinstance(value, (dict, list, set)) else value
+        # Validate JSON serializability upfront (fail fast)
+        try:
+            json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError) as e:
+            self.logger.error(
+                "GLOBAL_SET_SERIALIZATION_ERROR",
+                extra={"key": key, "component": component, "error": str(e)}
+            )
+            raise GlobalStoreError(f"Value for key '{key}' is not JSON serializable: {e}")
         
-        # Fine-grained locking per key for optimal concurrency
-        with self._locks[key]:
+        # Create safe copy to prevent mutation
+        safe_value = self._safe_copy(value)
+        
+        # Get or create lock for this key
+        lock = self._get_key_lock(key)
+        
+        with lock:
             if key in self._data:
                 if mode == "accumulate" and isinstance(self._data[key], list) and isinstance(safe_value, list):
                     # Special case: accumulate lists (create new list, don't mutate)
@@ -113,11 +121,7 @@ class GlobalStore:
             except (TypeError, ValueError) as e:
                 self.logger.warning(
                     "GLOBAL_SET_SERIALIZATION_WARNING",
-                    extra={
-                        "key": key,
-                        "component": component,
-                        "error": str(e)
-                    }
+                    extra={"key": key, "component": component, "error": str(e)}
                 )
             
             # Increment revision
@@ -139,6 +143,48 @@ class GlobalStore:
             )
             
             return True
+    
+    def _get_key_lock(self, key: str) -> threading.RLock:
+        """Get or create lock for key with periodic cleanup to prevent memory leaks."""
+        current_time = time.time()
+        
+        with self._global_lock:
+            # Clean up old unused locks every 5 minutes
+            if current_time - self._last_cleanup > 300:
+                self._cleanup_unused_locks()
+                self._last_cleanup = current_time
+            
+            if key not in self._locks:
+                self._locks[key] = threading.RLock()
+            
+            return self._locks[key]
+    
+    def _cleanup_unused_locks(self) -> None:
+        """Remove locks for keys that no longer exist in data."""
+        data_keys = set(self._data.keys())
+        lock_keys = set(self._locks.keys())
+        unused_keys = lock_keys - data_keys
+        
+        for key in unused_keys:
+            del self._locks[key]
+        
+        if unused_keys:
+            self.logger.debug(
+                "GLOBAL_STORE_LOCK_CLEANUP",
+                extra={"cleaned_locks": len(unused_keys), "remaining_locks": len(self._locks)}
+            )
+    
+    def _safe_copy(self, value: Any) -> Any:
+        """Create safe deep copy of value for thread safety."""
+        if value is None or isinstance(value, (int, float, str, bool)):
+            return value
+        
+        import copy
+        try:
+            return copy.deepcopy(value)
+        except Exception:
+            # Fallback for uncopyable objects
+            return value
     
     def revision(self) -> int:
         """
@@ -249,20 +295,9 @@ class BufferedStore:
         self._parent_buffer: Optional['BufferedStore'] = None
         self._child_buffers: Dict[str, 'BufferedStore'] = {}
     
-    def end_iteration(self) -> None:
-        """End current forEach iteration context."""
-        self.logger.debug(
-            "FOREACH_ITERATION_END",
-            extra={
-                "forEach_component": self.component_name,
-                "iteration": self._iteration_count
-            }
-        )
-        
-    
     def get(self, key: str, default: Any = None) -> Any:
         """
-        Get global variable value (thread-safe with selective locking).
+        Get global variable value from buffer first, then GlobalStore.
         
         Args:
             key: Global variable key (component_name__variable_name format)
@@ -271,23 +306,13 @@ class BufferedStore:
         Returns:
             Deep copy of stored value or default
         """
-        # Quick check without lock for non-existent keys
-        if key not in self._data:
-            return default
+        # Check buffer first
+        with self._buffer_lock:
+            if key in self._buffer:
+                return self.global_store._safe_copy(self._buffer[key])
         
-        # For mutable objects, acquire lock to prevent race with accumulate mode
-        value = self._data[key]
-        if isinstance(value, (dict, list)):
-            with self._locks[key]:
-                # Re-check after acquiring lock (double-checked locking pattern)
-                value = self._data.get(key, default)
-                if value is not None and isinstance(value, (dict, list)):
-                    import copy
-                    return copy.deepcopy(value)
-                return value
-        else:
-            # Immutable types (int, str, float, bool, None) are safe to return directly
-            return value
+        # Delegate to GlobalStore
+        return self.global_store.get(key, default)
     
     def set(self, key: str, value: Any, component: str = "forEach_component", mode: str = "replace") -> bool:
         """
@@ -302,10 +327,20 @@ class BufferedStore:
         Returns:
             True (always succeeds in buffer)
         """
+        # Validate JSON serializability upfront (fail fast)
+        try:
+            json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError) as e:
+            self.logger.error(
+                "BUFFERED_SET_SERIALIZATION_ERROR",
+                extra={"key": key, "component": component, "forEach_component": self.component_name, "error": str(e)}
+            )
+            raise GlobalStoreError(f"Value for key '{key}' is not JSON serializable: {e}")
+        
         with self._buffer_lock:
             if mode == "accumulate" and key in self._buffer and isinstance(self._buffer[key], list) and isinstance(value, list):
                 # Accumulate lists in buffer
-                self._buffer[key].extend(value)
+                self._buffer[key] = self._buffer[key] + value
             else:
                 # Store/replace in buffer
                 self._buffer[key] = value
@@ -352,13 +387,24 @@ class BufferedStore:
             target_store = self._parent_buffer if self._parent_buffer else self.global_store
             
             for key, value in self._buffer.items():
-                success = target_store.set(
-                    key, 
-                    value, 
-                    component=f"{self.component_name}_iteration_{self._iteration_count}",
-                    mode="replace"  # Iterator summary always replaces
-                )
-                results[key] = success
+                try:
+                    success = target_store.set(
+                        key, 
+                        value, 
+                        component=f"{self.component_name}_iteration_{self._iteration_count}",
+                        mode="replace"  # Iterator summary always replaces
+                    )
+                    results[key] = success
+                except Exception as e:
+                    self.logger.error(
+                        "BUFFERED_STORE_FLUSH_ERROR",
+                        extra={
+                            "key": key,
+                            "forEach_component": self.component_name,
+                            "error": str(e)
+                        }
+                    )
+                    results[key] = False
             
             # Log flush operation
             self.logger.info(
@@ -388,7 +434,15 @@ class BufferedStore:
         """
         with self._buffer_lock:
             # Clear any stale buffer from previous failed iterations
-            self._buffer.clear()
+            if self._buffer:
+                self.logger.warning(
+                    "BUFFERED_STORE_STALE_BUFFER",
+                    extra={
+                        "forEach_component": self.component_name,
+                        "stale_keys": list(self._buffer.keys())
+                    }
+                )
+                self._buffer.clear()
             
             self._iteration_count += 1
             self._is_flushed = False
@@ -398,10 +452,19 @@ class BufferedStore:
                 extra={
                     "forEach_component": self.component_name,
                     "iteration": self._iteration_count,
-                    "context_keys": list(iteration_data.keys()) if iteration_data else [],
-                    "buffer_cleared": True
+                    "context_keys": list(iteration_data.keys()) if iteration_data else []
                 }
             )
+    
+    def end_iteration(self) -> None:
+        """End current forEach iteration context."""
+        self.logger.debug(
+            "FOREACH_ITERATION_END",
+            extra={
+                "forEach_component": self.component_name,
+                "iteration": self._iteration_count
+            }
+        )
     
     def create_nested_buffer(self, nested_component_name: str) -> 'BufferedStore':
         """
