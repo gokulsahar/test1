@@ -21,6 +21,7 @@ import dask.dataframe as dd
 
 from pype.core.engine.global_store import GlobalStore, BufferedStore
 from pype.core.engine.subjob_tracker import SubJobTracker, ComponentState
+from pype.core.engine.templater import RuntimeTemplater, MissingGlobalVar
 from pype.components.base import BaseComponent
 
 
@@ -54,7 +55,7 @@ class ExecutionManager:
     """
     
     def __init__(self, execution_metadata: Dict[str, Any], global_store: GlobalStore, 
-                 threadpool: ThreadPoolExecutor, logger: logging.Logger):
+                 threadpool: ThreadPoolExecutor, logger: logging.Logger, job_folder: Path):
         """
         Initialize ExecutionManager with metadata and resources.
         
@@ -63,10 +64,15 @@ class ExecutionManager:
             global_store: Job-wide global variable store
             threadpool: Shared threadpool for blocking operations
             logger: Structured logger for execution events
+            job_folder: Path to job folder for template resolution
         """
         self.logger = logger
         self.global_store = global_store
         self.threadpool = threadpool
+        self.job_folder = job_folder
+        
+        # Initialize runtime templater for global variable resolution
+        self.runtime_templater = RuntimeTemplater(job_folder)
         
         # Extract metadata for execution
         self.node_metadata = execution_metadata['node_metadata']
@@ -388,12 +394,29 @@ class ExecutionManager:
     async def _execute_component_with_store(self, component_name: str, context: Dict[str, Any],
                                           inputs: Dict[str, Union[pd.DataFrame, dd.DataFrame]],
                                           store: Union[GlobalStore, BufferedStore]) -> ComponentResult:
-        """Core component execution with configurable store."""
+        """Core component execution with configurable store and global variable resolution."""
         start_time = time.perf_counter()
         
         try:
-            # Get or create component instance
-            component = self._get_component_instance(component_name, store)
+            # 1️⃣ Snapshot globals (fast, lock-free)
+            globals_snapshot = self._dump_globals_snapshot()
+            
+            # 2️⃣ Resolve component config with global variables
+            raw_config = self.node_metadata[component_name]["config"]
+            try:
+                resolved_config = self.runtime_templater.resolve_global_variables(
+                    raw_config, globals_snapshot
+                )
+            except MissingGlobalVar as e:
+                # Treat missing global variable as component error
+                raise ExecutionError(
+                    component_name, 
+                    f"Missing global variable: {e.global_key}",
+                    e
+                )
+            
+            # 3️⃣ Get or create component instance with resolved config
+            component = self._get_component_instance(component_name, resolved_config, store)
             
             # Execute with asyncio concurrency guard
             loop = asyncio.get_event_loop()
@@ -460,10 +483,15 @@ class ExecutionManager:
                 tokens_generated=tokens_generated
             )
     
-    def _get_component_instance(self, component_name: str, store: Union[GlobalStore, BufferedStore]) -> BaseComponent:
-        """Get or create component instance with lazy loading."""
-        if component_name in self._component_cache:
-            return self._component_cache[component_name]
+    def _get_component_instance(self, component_name: str, resolved_config: Dict[str, Any], 
+                              store: Union[GlobalStore, BufferedStore]) -> BaseComponent:
+        """Get or create component instance with lazy loading and resolved config."""
+        # Create cache key that includes resolved config hash for cache invalidation
+        config_hash = hash(str(sorted(resolved_config.items())))
+        cache_key = f"{component_name}_{config_hash}"
+        
+        if cache_key in self._component_cache:
+            return self._component_cache[cache_key]
         
         # Get component metadata
         metadata = self.node_metadata[component_name]
@@ -477,15 +505,15 @@ class ExecutionManager:
             module = importlib.import_module(module_path)
             component_class = getattr(module, class_name)
             
-            # Create instance
+            # Create instance with resolved config
             component = component_class(
                 name=component_name,
-                config=metadata['config'],
+                config=resolved_config,  # Pass resolved config
                 global_store=store
             )
             
-            # Cache for reuse
-            self._component_cache[component_name] = component
+            # Cache for reuse (with config-specific key)
+            self._component_cache[cache_key] = component
             return component
             
         except Exception as e:
