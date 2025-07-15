@@ -58,7 +58,7 @@ class GlobalStore:
             return copy.deepcopy(value)
         return value
     
-    def set(self, key: str, value: Any, component: str = "unknown") -> bool:
+    def set(self, key: str, value: Any, component: str = "unknown", mode: str = "replace") -> bool:
         """
         Set global variable value (extension-only, thread-safe).
         
@@ -66,25 +66,34 @@ class GlobalStore:
             key: Global variable key
             value: Value to store (must be JSON serializable)
             component: Component name for logging
+            mode: "replace" or "accumulate" (spec requirement, replace is default)
             
         Returns:
-            True if value was set, False if key already exists
+            True if value was set, False if key already exists (immutable)
         """
         # Fine-grained locking per key for optimal concurrency
         with self._locks[key]:
             if key in self._data:
-                self.logger.warning(
-                    "GLOBAL_SET_IGNORED",
-                    extra={
-                        "key": key,
-                        "component": component,
-                        "reason": "immutable_global_exists",
-                        "existing_value_type": type(self._data[key]).__name__
-                    }
-                )
-                return False
+                if mode == "accumulate" and isinstance(self._data[key], list) and isinstance(value, list):
+                    # Special case: accumulate lists
+                    self._data[key].extend(value)
+                else:
+                    # Immutable global exists - reject
+                    self.logger.warning(
+                        "GLOBAL_SET_IGNORED",
+                        extra={
+                            "key": key,
+                            "component": component,
+                            "reason": "immutable_global_exists",
+                            "existing_value_type": type(self._data[key]).__name__
+                        }
+                    )
+                    return False
+            else:
+                # New key - store value
+                self._data[key] = value
             
-            # Validate value size (warn only, don't reject)
+            # Validate value size (warn only, don't reject per spec)
             try:
                 serialized_size = len(json.dumps(value).encode('utf-8'))
                 if serialized_size > 65536:  # 64KB
@@ -97,7 +106,6 @@ class GlobalStore:
                             "size_limit": 65536
                         }
                     )
-                    # TODO: Add size validation and rejection in future version
             except (TypeError, ValueError) as e:
                 self.logger.warning(
                     "GLOBAL_SET_SERIALIZATION_WARNING",
@@ -108,13 +116,12 @@ class GlobalStore:
                     }
                 )
             
-            # Store value and increment revision
-            self._data[key] = value
+            # Increment revision
             with self._global_lock:
                 self._revision += 1
                 current_revision = self._revision
             
-            # Log successful set operation
+            # Log successful set operation (required by spec)
             self.logger.info(
                 "GLOBAL_SET",
                 extra={
@@ -122,7 +129,8 @@ class GlobalStore:
                     "component": component,
                     "value": value,
                     "revision": current_revision,
-                    "value_type": type(value).__name__
+                    "value_type": type(value).__name__,
+                    "mode": mode
                 }
             )
             
@@ -214,9 +222,6 @@ class BufferedStore:
     Provides the same API as GlobalStore but buffers all set() operations
     in memory during forEach iterations. At iteration completion, flush()
     writes consolidated updates to the underlying GlobalStore.
-    
-    This prevents lock contention during high-frequency forEach loops while
-    maintaining data consistency and logging requirements.
     """
     
     def __init__(self, global_store: GlobalStore, logger: logging.Logger, component_name: str = "forEach"):
@@ -236,13 +241,8 @@ class BufferedStore:
         self._iteration_count = 0
         self._is_flushed = False
         
-        # TODO: Add iteration context tracking for nested forEach
-        self._iteration_context: Dict[str, Any] = {}
-        
-        # TODO: Add parent BufferedStore reference for nested forEach
+        # Nested forEach support
         self._parent_buffer: Optional['BufferedStore'] = None
-        
-        # TODO: Add child BufferedStore tracking for nested forEach
         self._child_buffers: Dict[str, 'BufferedStore'] = {}
     
     def get(self, key: str, default: Any = None) -> Any:
@@ -268,7 +268,7 @@ class BufferedStore:
         # Fallback to GlobalStore
         return self.global_store.get(key, default)
     
-    def set(self, key: str, value: Any, component: str = "forEach_component") -> bool:
+    def set(self, key: str, value: Any, component: str = "forEach_component", mode: str = "replace") -> bool:
         """
         Buffer set operation for later flush to GlobalStore.
         
@@ -276,13 +276,18 @@ class BufferedStore:
             key: Global variable key
             value: Value to buffer
             component: Component name for logging
+            mode: "replace" or "accumulate"
             
         Returns:
             True (always succeeds in buffer)
         """
         with self._buffer_lock:
-            # Store in buffer
-            self._buffer[key] = value
+            if mode == "accumulate" and key in self._buffer and isinstance(self._buffer[key], list) and isinstance(value, list):
+                # Accumulate lists in buffer
+                self._buffer[key].extend(value)
+            else:
+                # Store/replace in buffer
+                self._buffer[key] = value
             
             # Log buffered operation
             self.logger.debug(
@@ -292,7 +297,8 @@ class BufferedStore:
                     "component": component,
                     "forEach_component": self.component_name,
                     "iteration": self._iteration_count,
-                    "value_type": type(value).__name__
+                    "value_type": type(value).__name__,
+                    "mode": mode
                 }
             )
             
@@ -317,14 +323,19 @@ class BufferedStore:
         results = {}
         
         with self._buffer_lock:
-            # TODO: Handle nested forEach buffer flushing hierarchy
-            # TODO: Implement buffer merge strategies for nested iterations
+            # Flush nested buffers first (inner to outer)
+            for child_name, child_buffer in self._child_buffers.items():
+                child_buffer.flush()
+            
+            # Flush this buffer to parent or GlobalStore
+            target_store = self._parent_buffer if self._parent_buffer else self.global_store
             
             for key, value in self._buffer.items():
-                success = self.global_store.set(
+                success = target_store.set(
                     key, 
                     value, 
-                    component=f"{self.component_name}_iteration_{self._iteration_count}"
+                    component=f"{self.component_name}_iteration_{self._iteration_count}",
+                    mode="replace"  # Iterator summary always replaces
                 )
                 results[key] = success
             
@@ -336,7 +347,8 @@ class BufferedStore:
                     "iteration": self._iteration_count,
                     "variables_flushed": len(self._buffer),
                     "successful_sets": sum(results.values()),
-                    "failed_sets": len(results) - sum(results.values())
+                    "failed_sets": len(results) - sum(results.values()),
+                    "target": "parent_buffer" if self._parent_buffer else "global_store"
                 }
             )
             
@@ -350,14 +362,11 @@ class BufferedStore:
         """
         Start new forEach iteration context.
         
-        TODO: Implement iteration context management for nested forEach.
-        
         Args:
             iteration_data: Optional iteration context data
         """
         with self._buffer_lock:
             self._iteration_count += 1
-            self._iteration_context = iteration_data or {}
             self._is_flushed = False
             
             self.logger.debug(
@@ -365,30 +374,13 @@ class BufferedStore:
                 extra={
                     "forEach_component": self.component_name,
                     "iteration": self._iteration_count,
-                    "context_keys": list(self._iteration_context.keys())
+                    "context_keys": list(iteration_data.keys()) if iteration_data else []
                 }
             )
-    
-    def end_iteration(self) -> None:
-        """
-        End current forEach iteration.
-        
-        TODO: Implement iteration cleanup and state management.
-        """
-        self.logger.debug(
-            "FOREACH_ITERATION_END",
-            extra={
-                "forEach_component": self.component_name,
-                "iteration": self._iteration_count,
-                "buffered_variables": len(self._buffer)
-            }
-        )
     
     def create_nested_buffer(self, nested_component_name: str) -> 'BufferedStore':
         """
         Create nested BufferedStore for inner forEach components.
-        
-        TODO: Implement nested forEach buffer hierarchy and flush ordering.
         
         Args:
             nested_component_name: Name of nested forEach component
@@ -418,14 +410,7 @@ class BufferedStore:
         return nested_buffer
     
     def _get_nesting_depth(self) -> int:
-        """
-        Calculate nesting depth for this BufferedStore.
-        
-        TODO: Implement proper nesting depth calculation.
-        
-        Returns:
-            Current nesting depth
-        """
+        """Calculate nesting depth for this BufferedStore."""
         depth = 0
         current = self._parent_buffer
         while current is not None:
@@ -447,47 +432,3 @@ class BufferedStore:
     def __len__(self) -> int:
         """Get total number of variables (buffer + GlobalStore)."""
         return len(self.keys())
-    
-    # TODO: BufferedStore Implementation (to be added to global_store.py)
-"""
-BufferedStore should be implemented in pype/core/engine/global_store.py with these methods:
-
-class BufferedStore:
-    '''
-    Iterator-aware buffered store for forEach components.
-    
-    Accumulates set() calls in memory during iteration, flushes to GlobalStore
-    only at forEach completion to minimize lock contention.
-    '''
-    
-    def __init__(self, global_store: GlobalStore, iterator_name: str):
-        '''Initialize with parent GlobalStore and iterator identifier.'''
-        
-    def get(self, key: str, default=None) -> Any:
-        '''Get value from buffer or fall back to GlobalStore.'''
-        
-    def set(self, key: str, value: Any, *, mode="replace", component: str = None) -> bool:
-        '''Buffer set() calls in memory, validate size limits.'''
-        
-    def revision(self) -> int:
-        '''Return combined revision from buffer + GlobalStore.'''
-        
-    def flush(self) -> Dict[str, Any]:
-        '''Flush all buffered updates to GlobalStore atomically.'''
-        
-    def discard(self) -> None:
-        '''Discard all buffered changes without flushing.'''
-        
-    def pending_changes(self) -> Dict[str, Any]:
-        '''Get dict of pending changes for inspection.'''
-
-Nested forEach Support:
-- Inner BufferedStore flushes to outer BufferedStore (not GlobalStore)
-- Only outermost forEach flushes to GlobalStore
-- Maintains iterator hierarchy metadata
-
-Integration Points:
-- ExecutionManager.get_store_for_component() creates BufferedStore for forEach
-- Orchestrator calls flush() at forEach completion boundaries
-- CheckpointManager includes BufferedStore state in snapshots
-"""

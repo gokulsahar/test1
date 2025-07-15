@@ -1,14 +1,8 @@
 """
-DataPY Job Planner - Simplified job planning with essential functionality.
+DataPY Job Planner 
 
 This module orchestrates the complete job planning process, transforming a validated JobModel
-into an execution-ready PlanResult with metadata for runtime execution.
-
-The planner follows a strict 4-phase approach:
-1. Graph Building - Convert JobModel to NetworkX DAG
-2. Port Resolution - Resolve wildcard ports and validate connectivity
-3. Subjob Analysis - Detect subjob boundaries using control edges
-4. Structure Validation - Comprehensive DAG validation
+into an execution-ready PlanResult with metadata for runtime execution
 """
 
 from datetime import datetime
@@ -28,29 +22,23 @@ from pype.core.planner.structure_validator import (
     ValidationWarning,
     StructureValidationError
 )
-from pype.core.utils.constants import ENGINE_VERSION
 
+
+from pype.core.utils.constants import (
+    ENGINE_VERSION,
+    DEFAULT_GC_THRESHOLD_MB,
+    DEFAULT_RSS_SOFT_LIMIT_RATIO  
+)
 
 # Version constants
 PLANNER_VERSION = "1.0.0"
 
 
+
 @dataclass
 class PlanResult:
     """
-    Simplified planning result with essential metadata for runtime execution.
-    
-    This dataclass contains all artifacts needed for runtime execution, focusing
-    on essential DAG structure and subjob planning.
-    
-    Attributes:
-        dag: NetworkX DiGraph with component metadata and resolved ports
-        subjob_components: Mapping of subjob IDs to component lists
-        subjob_execution_order: Topologically sorted subjob execution sequence
-        validation_errors: Critical errors that prevent execution
-        validation_warnings: Non-critical issues
-        execution_metadata: Essential runtime data
-        build_metadata: Build timestamp, versions, and artifact metadata
+    Planning result with essential metadata for runtime execution including memory management.
     """
     # Core execution artifacts - Required for runtime
     dag: nx.DiGraph
@@ -61,7 +49,7 @@ class PlanResult:
     validation_errors: List[ValidationError]
     validation_warnings: List[ValidationWarning]
     
-    # Essential runtime metadata
+    # Essential runtime metadata with memory management
     execution_metadata: Dict[str, Any]
     build_metadata: Dict[str, Any]
 
@@ -72,24 +60,14 @@ class PlanningError(Exception):
 
 
 class CriticalPlanningError(PlanningError):
-    """
-    Raised when critical errors prevent plan creation.
-    
-    These errors indicate fundamental issues that make the job unexecutable,
-    such as circular dependencies, missing components, or invalid configurations.
-    """
+    """Raised when critical errors prevent plan creation."""
     def __init__(self, message: str, errors: List[ValidationError]):
         self.errors = errors
         super().__init__(message)
 
 
 class PlanningPhaseError(PlanningError):
-    """
-    Raised when a specific planning phase fails.
-    
-    These errors indicate issues within a particular planning phase that prevent
-    progression to subsequent phases.
-    """
+    """Raised when a specific planning phase fails."""
     def __init__(self, phase_name: str, message: str, errors: List[ValidationError]):
         self.phase_name = phase_name
         self.errors = errors
@@ -98,25 +76,11 @@ class PlanningPhaseError(PlanningError):
 
 class JobPlanner:
     """
-    Orchestrates complete job planning process with simplified approach.
-    
-    The JobPlanner transforms a validated JobModel into an execution-ready PlanResult
-    through four distinct phases, generating essential metadata for runtime execution.
-    
-    Planning Phases:
-    1. Graph Building: Convert JobModel to NetworkX DAG
-    2. Port Resolution: Resolve wildcard ports and validate connectivity
-    3. Subjob Analysis: Detect boundaries using control edges
-    4. Structure Validation: Comprehensive DAG validation
+    Orchestrates complete job planning process with memory management integration.
     """
     
     def __init__(self, registry: ComponentRegistry):
-        """
-        Initialize planner with component registry.
-        
-        Args:
-            registry: Component registry for metadata lookup during planning
-        """
+        """Initialize planner with component registry."""
         self.registry = registry
         self.graph_builder = GraphBuilder(registry)
         self.port_resolver = PortResolver()
@@ -125,26 +89,19 @@ class JobPlanner:
     
     def plan_job(self, job_model: JobModel) -> PlanResult:
         """
-        Execute complete job planning process.
-        
-        This is the main entry point that orchestrates all planning phases and produces
-        a complete PlanResult ready for runtime execution.
+        Execute complete job planning process with memory management.
         
         Args:
-            job_model: Validated JobModel from loader with resolved templates
+            job_model: Validated JobModel from loader
             
         Returns:
-            PlanResult with complete execution plan and essential metadata
-            
-        Raises:
-            CriticalPlanningError: When critical errors prevent planning
-            PlanningPhaseError: When a specific phase fails
+            PlanResult with complete execution plan and memory management metadata
         """
         try:
             # Execute all planning phases in strict order
             dag, subjob_components, subjob_metadata, all_errors, all_warnings = self._execute_planning_phases(job_model)
             
-            # Generate essential execution metadata
+            # Generate execution metadata with memory management
             execution_metadata = self._generate_execution_metadata(
                 dag, subjob_components, subjob_metadata, job_model
             )
@@ -166,25 +123,15 @@ class JobPlanner:
             return plan_result
             
         except (CriticalPlanningError, PlanningPhaseError):
-            # Re-raise planning errors with full context
             raise
         except Exception as e:
-            # Wrap unexpected errors in standard format
             raise CriticalPlanningError(
                 f"Unexpected error during planning: {str(e)}",
-                [ValidationError(
-                    code="UNEXPECTED_ERROR",
-                    message=str(e)
-                )]
+                [ValidationError(code="UNEXPECTED_ERROR", message=str(e))]
             )
     
     def _execute_planning_phases(self, job_model: JobModel) -> Tuple[nx.DiGraph, Dict[str, List[str]], Dict[str, Dict[str, Any]], List[ValidationError], List[ValidationWarning]]:
-        """
-        Execute all planning phases with strict dependency management.
-        
-        Returns:
-            Tuple of (final_dag, subjob_components, subjob_metadata, all_errors, all_warnings)
-        """
+        """Execute all planning phases with strict dependency management."""
         all_errors = []
         all_warnings = []
         
@@ -207,169 +154,19 @@ class JobPlanner:
         
         return dag, subjob_components, subjob_metadata, all_errors, all_warnings
 
-    
     def _phase_1_graph_building(self, job_model: JobModel) -> nx.DiGraph:
-        """
-        Phase 1: Build core DAG structure.
-        
-        This phase converts the JobModel into a NetworkX DiGraph with metadata
-        for each component and edge. It validates component existence in the registry
-        and builds the foundation for subsequent planning phases.
-        
-        Args:
-            job_model: Validated JobModel with all templates resolved
-            
-        Returns:
-            NetworkX DiGraph with component nodes and connection edges
-            
-        Raises:
-            PlanningPhaseError: On critical graph building errors
-        """
+        """Phase 1: Build core DAG structure."""
         try:
             dag = self.graph_builder.build_graph(job_model)
             return dag
-            
         except GraphBuildError as e:
-            # Critical error - abort immediately
             raise PlanningPhaseError(
-                "Graph Building",
-                str(e),
-                [ValidationError(
-                    code="GRAPH_BUILD_ERROR",
-                    message=str(e)
-                )]
-            )
-    
-    def _phase_3_port_resolution(self, dag: nx.DiGraph) -> nx.DiGraph:
-        """
-        Phase 3: Resolve wildcard ports and validate connectivity.
-        
-        Args:
-            dag: DAG from Phase 1 with basic structure
-            
-        Returns:
-            Updated DAG with resolved ports and connectivity metadata
-            
-        Raises:
-            PlanningPhaseError: On critical port resolution errors
-        """
-        try:
-            updated_dag, errors = self.port_resolver.resolve_ports(dag)
-            
-            if errors:
-                # Port resolution errors are critical
-                raise PlanningPhaseError(
-                    "Port Resolution",
-                    f"Found {len(errors)} port resolution errors",
-                    [ValidationError(
-                        code="PORT_RESOLUTION_ERROR",
-                        message=error
-                    ) for error in errors]
-                )
-            
-            return updated_dag
-            
-        except PortResolutionError as e:
-            raise PlanningPhaseError(
-                "Port Resolution",
-                str(e),
-                [ValidationError(
-                    code="PORT_RESOLUTION_ERROR",
-                    message=str(e)
-                )]
-            )
-    
-    
-    
-    def _phase_4_iterator_validation(self, dag: nx.DiGraph) -> nx.DiGraph:
-        """
-        Phase 4: Iterator boundary marking and forEach validation.
-        """
-        try:
-            iterator_validator = ForEachValidator()
-            
-            errors = iterator_validator.analyze_forEach_boundaries(dag)
-            
-            if errors:
-                # Iterator validation errors are critical
-                raise PlanningPhaseError(
-                    "Iterator Validation",
-                    f"Found {len(errors)} forEach validation errors",
-                    [ValidationError(
-                        code="FOREACH_VALIDATION_ERROR",
-                        message=error
-                    ) for error in errors]
-                )
-            
-            return dag
-            
-        except Exception as e:
-            raise PlanningPhaseError(
-                "Iterator Validation",
-                str(e),
-                [ValidationError(
-                    code="FOREACH_VALIDATION_ERROR",
-                    message=str(e)
-                )]
-            )
-    
-    
-    
-    def _phase_5_subjob_analysis(self, dag: nx.DiGraph) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
-        """
-        Phase 5: Analyze subjob structure for execution planning.
-        
-        Args:
-            dag: Resolved DAG from previous phases with forEach boundaries marked
-            
-        Returns:
-            Tuple of (subjob_components, subjob_metadata)
-            
-        Raises:
-            PlanningPhaseError: On critical subjob analysis errors
-        """
-        try:
-            subjob_components, subjob_metadata, errors = self.subjob_analyzer.analyze_subjobs(dag)
-            
-            if errors:
-                # Subjob analysis errors are critical
-                raise PlanningPhaseError(
-                    "Subjob Analysis",
-                    f"Found {len(errors)} subjob analysis errors",
-                    [ValidationError(
-                        code="SUBJOB_ANALYSIS_ERROR",
-                        message=error
-                    ) for error in errors]
-                )
-            
-            return subjob_components, subjob_metadata
-            
-        except SubjobAnalysisError as e:
-            raise PlanningPhaseError(
-                "Subjob Analysis",
-                str(e),
-                [ValidationError(
-                    code="SUBJOB_ANALYSIS_ERROR",
-                    message=str(e)
-                )]
+                "Graph Building", str(e),
+                [ValidationError(code="GRAPH_BUILD_ERROR", message=str(e))]
             )
     
     def _phase_2_structure_validation(self, dag: nx.DiGraph) -> Tuple[List[ValidationError], List[ValidationWarning]]:
-        """
-        Phase 2: Comprehensive structure validation.
-        
-        This phase performs final validation of the complete DAG structure,
-        checking for cycles, unreachable components, and invalid references.
-        
-        Args:
-            dag: Complete DAG from previous phases
-            
-        Returns:
-            Tuple of (validation_errors, validation_warnings)
-            
-        Raises:
-            CriticalPlanningError: On critical validation errors that prevent execution
-        """
+        """Phase 2: Comprehensive structure validation."""
         try:
             errors, warnings = self.structure_validator.validate_structure(dag)
             
@@ -382,15 +179,64 @@ class JobPlanner:
                 )
             
             return errors, warnings
-                
         except StructureValidationError as e:
-            # Structure validation critical errors
             raise CriticalPlanningError(
-                str(e),
-                [ValidationError(
-                    code="STRUCTURE_VALIDATION_ERROR",
-                    message=str(e)
-                )]
+                str(e), [ValidationError(code="STRUCTURE_VALIDATION_ERROR", message=str(e))]
+            )
+    
+    def _phase_3_port_resolution(self, dag: nx.DiGraph) -> nx.DiGraph:
+        """Phase 3: Resolve wildcard ports and validate connectivity."""
+        try:
+            updated_dag, errors = self.port_resolver.resolve_ports(dag)
+            
+            if errors:
+                raise PlanningPhaseError(
+                    "Port Resolution", f"Found {len(errors)} port resolution errors",
+                    [ValidationError(code="PORT_RESOLUTION_ERROR", message=error) for error in errors]
+                )
+            
+            return updated_dag
+        except PortResolutionError as e:
+            raise PlanningPhaseError(
+                "Port Resolution", str(e),
+                [ValidationError(code="PORT_RESOLUTION_ERROR", message=str(e))]
+            )
+    
+    def _phase_4_iterator_validation(self, dag: nx.DiGraph) -> nx.DiGraph:
+        """Phase 4: Iterator boundary marking and forEach validation."""
+        try:
+            iterator_validator = ForEachValidator()
+            errors = iterator_validator.analyze_forEach_boundaries(dag)
+            
+            if errors:
+                raise PlanningPhaseError(
+                    "Iterator Validation", f"Found {len(errors)} forEach validation errors",
+                    [ValidationError(code="FOREACH_VALIDATION_ERROR", message=error) for error in errors]
+                )
+            
+            return dag
+        except Exception as e:
+            raise PlanningPhaseError(
+                "Iterator Validation", str(e),
+                [ValidationError(code="FOREACH_VALIDATION_ERROR", message=str(e))]
+            )
+    
+    def _phase_5_subjob_analysis(self, dag: nx.DiGraph) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
+        """Phase 5: Analyze subjob structure for execution planning."""
+        try:
+            subjob_components, subjob_metadata, errors = self.subjob_analyzer.analyze_subjobs(dag)
+            
+            if errors:
+                raise PlanningPhaseError(
+                    "Subjob Analysis", f"Found {len(errors)} subjob analysis errors",
+                    [ValidationError(code="SUBJOB_ANALYSIS_ERROR", message=error) for error in errors]
+                )
+            
+            return subjob_components, subjob_metadata
+        except SubjobAnalysisError as e:
+            raise PlanningPhaseError(
+                "Subjob Analysis", str(e),
+                [ValidationError(code="SUBJOB_ANALYSIS_ERROR", message=str(e))]
             )
     
     def _find_job_starters(self, dag: nx.DiGraph) -> List[str]:
@@ -404,41 +250,87 @@ class JobPlanner:
                 job_starters.append(node)
         return job_starters
     
+    def _calculate_edge_use_counts(self, dag: nx.DiGraph) -> Dict[str, int]:
+        """
+        Calculate use counts for data edges using "free-when-last-consumer-finishes" policy.
+        
+        Args:
+            dag: NetworkX DiGraph with resolved ports
+            
+        Returns:
+            Dict mapping edge_id ("source.port->target.port") to use count
+        """
+        use_counts = {}
+        
+        # Process all data edges to count consumers
+        for source, target, edge_data in dag.edges(data=True):
+            if edge_data.get('edge_type') != 'data':
+                continue
+                
+            source_port = edge_data.get('source_port', 'main')
+            target_port = edge_data.get('target_port', 'main')
+            
+            # Create edge ID: "source.port->target.port"
+            edge_id = f"{source}.{source_port}->{target}.{target_port}"
+            
+            # Each data edge has exactly one consumer (the target component)
+            # Use count represents how many components will consume this specific edge
+            use_counts[edge_id] = 1
+        
+        return use_counts
+    
+    def _generate_memory_management_metadata(self, dag: nx.DiGraph, job_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate memory management metadata for runtime optimization.
+        
+        Args:
+            dag: NetworkX DiGraph with resolved ports
+            job_config: Job configuration from JobModel
+            
+        Returns:
+            Memory management configuration and edge use counts
+        """
+        # Calculate edge use counts for reference counting
+        edge_use_counts = self._calculate_edge_use_counts(dag)
+        
+        # Extract GC configuration from job_config with defaults
+        gc_threshold_mb = job_config.get('gc_threshold_mb', DEFAULT_GC_THRESHOLD_MB)
+        rss_soft_limit_ratio = job_config.get('rss_soft_limit_ratio', DEFAULT_RSS_SOFT_LIMIT_RATIO)
+        
+        return {
+            'edge_use_counts': edge_use_counts,
+            'gc_threshold_mb': gc_threshold_mb,
+            'rss_soft_limit_ratio': rss_soft_limit_ratio,
+            'memory_policy': 'free_when_last_consumer_finishes'
+        }
     
     def _generate_execution_metadata(self, dag: nx.DiGraph, 
                                subjob_components: Dict[str, List[str]], 
                                subjob_metadata: Dict[str, Dict[str, Any]],
                                job_model: JobModel) -> Dict[str, Any]:
         """
-        Generate essential execution metadata for runtime optimization.
-        
-        This method creates metadata needed for runtime execution, focusing on
-        essential data structures that eliminate runtime registry/DAG queries.
-        
-        Returns:
-            Essential metadata dictionary for runtime execution
+        Generate execution metadata with memory management for runtime optimization.
         """
-        # Find job starter components (correct logic: startable=True + no incoming edges)
+        # Find job starter components
         job_starters = self._find_job_starters(dag)
         
-        # Validate we have at least one job starter
         if not job_starters:
             raise CriticalPlanningError(
-                "No job starter components found. At least one component must have startable=True and no incoming edges.",
-                [ValidationError(
-                    code="NO_JOB_STARTERS",
-                    message="No components can start the job execution"
-                )]
+                "No job starter components found",
+                [ValidationError(code="NO_JOB_STARTERS", message="No components can start the job execution")]
             )
         
-        # Create component dependency cache and port mapping in single pass
+        # Create dependency and port caches
         component_dependencies, port_mapping = self._create_dependency_and_port_caches(dag)
         
-        # Create component-to-subjob lookup for O(1) access
+        # Create component-to-subjob lookup
         component_to_subjob = self._create_component_subjob_lookup(subjob_components)
         
         # Generate dependency tokens for event-driven scheduler
         dependency_tokens = self._generate_dependency_tokens(dag, subjob_components, component_to_subjob)
+        
+        # Generate memory management metadata
+        memory_management = self._generate_memory_management_metadata(dag, self._extract_job_config_metadata(job_model))
         
         # Extract all node metadata for engine
         node_metadata = {}
@@ -465,32 +357,19 @@ class JobPlanner:
             'port_mapping': port_mapping,
             'node_metadata': node_metadata,
             'subjob_boundaries': subjob_metadata,
-            'dependency_tokens': dependency_tokens,  # NEW: Token-based dependencies
+            'dependency_tokens': dependency_tokens,
+            
+            # Memory management metadata
+            'memory_management': memory_management,
             
             # Job configuration for runtime
             'job_config': self._extract_job_config_metadata(job_model)
         }
         
-        
     def _generate_dependency_tokens(self, dag: nx.DiGraph, 
                                 subjob_components: Dict[str, List[str]],
                                 component_to_subjob: Dict[str, str]) -> Dict[str, Set[str]]:
-        """
-        Generate dependency tokens for event-driven scheduler with explicit trigger encoding.
-        
-        Token Format:
-        - ok/error/if edges → <componentID>::<trigger> (e.g., "comp_a::ok", "comp_b::error", "comp_c::if1")
-        - subjob_ok → SUBJOB_OK::<subjobID>
-        - subjob_error → SUBJOB_ERR::<subjobID>
-        
-        Args:
-            dag: NetworkX DiGraph with components and edges
-            subjob_components: Mapping of subjob IDs to component lists
-            component_to_subjob: Mapping of component names to subjob IDs
-            
-        Returns:
-            Dictionary mapping subjob_id to set of dependency tokens it waits for
-        """
+        """Generate dependency tokens for event-driven scheduler with explicit trigger encoding."""
         # Initialize waiting tokens for each subjob
         subjob_waiting_tokens = {subjob_id: set() for subjob_id in subjob_components.keys()}
         
@@ -510,57 +389,30 @@ class JobPlanner:
             
             # Generate appropriate token based on trigger type with explicit encoding
             if trigger == 'ok':
-                # Component success trigger: token = <componentID>::ok
                 token = f"{source}::ok"
             elif trigger == 'error':
-                # Component error trigger: token = <componentID>::error
                 token = f"{source}::error"
             elif trigger.startswith('if'):
-                # Conditional trigger: token = <componentID>::<trigger> (e.g., comp::if1)
-                token = f"{source}::{trigger}"
+                token = f"{source}::{trigger}"  # e.g., "comp::if3"
             elif trigger == 'subjob_ok':
-                # Subjob completion trigger: token = SUBJOB_OK::<subjob_id>
                 token = f"SUBJOB_OK::{source_subjob}"
             elif trigger == 'subjob_error':
-                # Subjob error trigger: token = SUBJOB_ERR::<subjob_id>
                 token = f"SUBJOB_ERR::{source_subjob}"
             else:
-                # Unknown trigger type - should have been caught in validation
                 continue
             
             # Add token to target subjob's waiting list
             if target_subjob:
                 subjob_waiting_tokens[target_subjob].add(token)
         
-        # Process data edges to add data dependency tokens (if cross-subjob)
-        for source, target, edge_data in dag.edges(data=True):
-            if edge_data.get('edge_type') != 'data':
-                continue
-                
-            source_subjob = component_to_subjob.get(source)
-            target_subjob = component_to_subjob.get(target)
-            
-            # Data edges should not cross subjob boundaries (validation should catch this)
-            if source_subjob != target_subjob:
-                continue
-                
-            # Data dependencies within subjobs are handled by component execution order
-            # No tokens needed for intra-subjob data flow
-        
         # Convert sets to sorted lists for deterministic serialization
         return {
             subjob_id: sorted(list(tokens)) 
             for subjob_id, tokens in subjob_waiting_tokens.items()
-        }    
-        
+        }
     
     def _create_dependency_and_port_caches(self, dag: nx.DiGraph) -> Tuple[Dict[str, Dict[str, List[str]]], Dict[str, Dict[str, List[Tuple[str, str]]]]]:
-        """
-        Create both dependency cache and port mapping in a single graph traversal.
-        
-        Returns:
-            Tuple of (component_dependencies, port_mapping)
-        """
+        """Create both dependency cache and port mapping in a single graph traversal."""
         dependencies = {}
         port_mapping = {}
         
@@ -599,12 +451,7 @@ class JobPlanner:
         return dependencies, port_mapping
     
     def _create_component_subjob_lookup(self, subjob_components: Dict[str, List[str]]) -> Dict[str, str]:
-        """
-        Create O(1) lookup table for component-to-subjob mapping.
-        
-        Returns:
-            {component_name: subjob_id}
-        """
+        """Create O(1) lookup table for component-to-subjob mapping."""
         component_to_subjob = {}
         for subjob_id, components in subjob_components.items():
             for component in components:
