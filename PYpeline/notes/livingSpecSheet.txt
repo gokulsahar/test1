@@ -1,0 +1,506 @@
+# PYpeline v1 Specification
+
+## Overview
+
+PYpeline is a Python-based ETL job builder and runner designed to be cloud-agnostic and Talend-style. It provides a pluggable, scalable framework with clean orchestration patterns and reliable checkpointing.
+
+**Naming Convention:**
+- **CLI command**: `pype` 
+- **Library namespace**: `pypeline`
+- **Project root**: `pypeline/`
+
+## Core Terminologies
+
+### Data Flow Concepts
+- **Line**: Data flows through lines between modules
+- **Pype**: Control flows through pypes with valve settings
+- **Valve**: Control settings in format `(order|condition)` 
+- **Module**: Does one logical unit of work
+- **Pod**: Logical boundaries formed around modules; connected via pypes
+- **Flow**: Complete ETL job composed of interconnected pods
+
+### Module Categories
+
+| Module Type | Line In/Out | Pype In/Out | Purpose |
+|-------------|-------------|-------------|---------|
+| **Tanks** (lonePods) | No In, No Out | Yes In, Yes Out | Standalone processing |
+| **Taps** (sources) | No In, Only Out | Yes In, Yes Out | Data sources |
+| **Sinks** | Yes In, No Out | No In, Yes Out | Data destinations |
+| **Mods** (transforms) | Yes In, Yes Out | No In, No Out | Data transformations |
+
+## Project Structure
+
+```
+pypeline/
+├── cli/
+│   ├── __init__.py
+│   ├── cli.py                      # Main CLI orchestrator
+│   └── cli_registry.py             # Registry CRUD operations
+├── modules/
+│   ├── __init__.py
+│   ├── ModRegistry.json            # Component registry
+│   ├── taps/, mods/, sinks/, tanks/ # Component folders
+│   ├── sdk/
+│   │   ├── __init__.py
+│   │   └── base.py                 # BaseModule class
+│   └── modules.py                  # Module loading orchestrator
+├── build/
+│   ├── __init__.py
+│   ├── load/                       # YAML validation & parsing
+│   ├── plan/                       # DAG creation, metadata embedding
+│   └── build.py                    # Build orchestrator
+├── run/
+│   ├── __init__.py
+│   ├── run.py                      # Execution orchestrator
+│   ├── templater/                  # Variable substitution & secrets
+│   ├── scheduling/
+│   │   ├── __init__.py
+│   │   └── scheduler.py            # Priority-DFS scheduler
+│   ├── execution/
+│   │   ├── __init__.py
+│   │   ├── topo.py                 # Data subgraph execution
+│   │   └── context.py              # RunContext management
+│   ├── artifacts/
+│   │   ├── __init__.py
+│   │   └── artifact.py             # Memory/Parquet storage
+│   └── observe/
+│       ├── __init__.py
+│       └── logging.py              # JSON logging
+├── utils/
+│   ├── __init__.py
+│   ├── constants.py                # Common constants
+│   ├── memory.py                   # Memory monitoring utilities
+│   └── helpers.py                  # Utility functions
+└── schema/
+    └── flow.schema.json            # YAML validation schema
+```
+
+## Architecture Patterns
+
+### Orchestrator Pattern
+Each folder contains a Python file with the same name that acts as the main orchestrator:
+- `cli/cli.py` - orchestrates all CLI operations
+- `build/build.py` - orchestrates load→plan→output workflow
+- `modules/modules.py` - orchestrates module loading/registry
+- `run/run.py` - orchestrates execution flow
+
+This pattern provides:
+- Clear API boundaries
+- Easy extension with new workers
+- Separation of concerns
+- Future pluggability
+
+## Core Scheduler Design
+
+### Control Flow Rules
+- **Priority-DFS**: Depth-first search with ascending valve order
+- **Special Orders**:
+  - `order: 0` - Data edges (internal use only, immediate flow within pods)
+  - `order: 1..N` - User-defined priority control execution
+  - `order: Last` - Replaced at build time with max(order)+1
+- **User Constraints**: Users can only specify orders 1 and above; order 0 is reserved for internal data flow
+- **Parallel Execution**: Multiple edges from same module with same order execute in parallel via `asyncio.gather()`
+
+### Edge Types
+- **NORMAL**: Ordinary control edge with priority ordering
+- **ITERATE**: Run downstream scope once per item produced by upstream
+- **START**: Fire-and-forget control edge (spawn coroutine, resolve SUCCESS immediately)
+
+### Iteration Framework
+- **ITERATE Edge**: Carries a *list artifact* from upstream module
+- **Scheduler Behavior**: Executes dominated scope once per list element via iteration frame
+- **Context Access**: Exposes `ctx.iter_item` / `ctx.iter_index` per loop iteration
+- **Execution Flow**: DFS dives into scope[0], unwinds, increments index until list is exhausted
+
+### Data Execution Waves
+Inside each pod, pure-data sub-graphs are executed by:
+```python
+async def topo_waves(graph, ctx):
+    while ready_nodes:
+        batch = get_ready_nodes()
+        await asyncio.gather(*[run_node(node) for node in batch])
+```
+
+## Module System
+
+### Base Module Interface
+```python
+class BaseModule:
+    # Required class attributes
+    TYPE: str = "unknown"           # tap, mod, sink, tank
+    VERSION: str = "1.0.0"
+    DESCRIPTION: str = ""
+    CATEGORY: str = "unknown"       # UI grouping
+    INPUT_PORTS: List[str] = []
+    OUTPUT_PORTS: List[str] = []
+    GLOBALS: List[str] = []         # Variables this module generates
+    PACKAGES: List[str] = []        # Third-party dependencies
+    FRAME_OVERRIDE: str = None      # Optional: "pandas", "polars", "dask" override
+    
+    CONFIG_SCHEMA: Dict[str, Any] = {
+        "required": {},  # param_name: {"type": "str", "description": "..."}
+        "optional": {}   # param_name: {"type": "str", "default": value, "description": "..."}
+    }
+    
+    # Required methods
+    async def run(self, inputs: dict, ctx: RunContext) -> dict:
+        """Main business logic - always a coroutine"""
+        pass
+    
+    # Optional lifecycle hooks
+    async def setup(self, ctx: RunContext):
+        """Run once per node instance before first run"""
+        pass
+        
+    async def teardown(self, ctx: RunContext):
+        """Always awaited for clean shutdown"""
+        pass
+```
+
+### Frame Engine Policy
+- **Flow-level default**: Set in YAML `settings.frame_engine` (pandas/polars/dask)
+- **Module override**: Optional `FRAME_OVERRIDE` class attribute for specific needs
+- **No magic conversions**: ArtifactManager stores/returns requested frame type
+- **Scheduler responsibility**: Check `getattr(mod_cls, "FRAME_OVERRIDE", ctx.default_engine)` for frame selection
+
+### Module Registry Structure
+```json
+{
+  "csv_tap": {
+    "module_path": "pypeline.modules.taps.csv_tap",
+    "type": "tap",
+    "version": "1.0.0",
+    "description": "Reads data from CSV files",
+    "category": "File Sources",
+    "input_ports": [],
+    "output_ports": ["data"],
+    "globals": ["row_count", "file_size"],
+    "packages": ["pandas", "chardet"],
+    "config_schema": {
+      "required": {
+        "file_path": {"type": "str", "description": "Path to CSV file"}
+      },
+      "optional": {
+        "encoding": {"type": "str", "default": "utf-8", "description": "File encoding"}
+      }
+    }
+  }
+}
+```
+
+### Module Loading Strategy
+- **Runtime Imports**: Exact module path embedded in `dag.json`
+- **Registry Role**: Optional convenience for discovery and validation
+- **Execution Independence**: Runtime doesn't require registry for module loading
+
+### Registration Commands
+```bash
+# Register single module
+pype register-module csv_tap
+
+# Clear registry
+pype clear-registry
+
+# Auto-register all modules in folders
+pype auto-register
+```
+
+## Variable System
+
+### Context Variables & Templating
+- **Format**: `{{context.varname}}`
+- **Source**: Environment/config values from context files
+- **Substitution**: Runtime replacement via `run/templater/`
+- **Secrets Integration**: HashiCorp Vault connector for runtime secret fetching
+- **Security**: Secrets never stored in JSON/YAML files
+
+### Global Variables
+- **Format**: `{{moduleid__VarName}}`
+- **Source**: Runtime values generated by modules
+- **Storage**: Central dict in Scheduler with keys `{node_id}#{iter_index}.{var_name}`
+- **Access**: Case-insensitive
+
+### Templater Component
+Location: `run/templater/`
+- **Context Substitution**: Replace `{{context.*}}` with environment values
+- **Secret Resolution**: Runtime HashiCorp Vault integration
+- **Security Policy**: No secrets persist in build artifacts
+
+## Execution Context
+
+### RunContext
+```python
+class RunContext:
+    def __init__(self, node_id: str, artifact_manager, executor, logger, global_store):
+        self.node_id = node_id          # Format: "module_id#iter_index"
+        self.artifact_manager = artifact_manager
+        self.executor = executor        # ThreadPoolExecutor reference
+        self.logger = logger
+        self._global_store = global_store  # MappingProxyType for reads
+    
+    def set_global(self, key: str, value: Any):
+        """Write to shared global store"""
+        full_key = f"{self.node_id}.{key}"
+        self._global_store[full_key] = value
+    
+    def get_global(self, module_id: str, key: str) -> Any:
+        """Read from global store with module prefix"""
+        pass
+```
+
+### Thread Pool Management
+- **Creation**: Single process-wide ThreadPoolExecutor in `run.py`
+- **Configuration**: YAML `threads:` key or `PYPELINE_THREADS` env var
+- **Default**: `os.cpu_count() * 2`
+- **Usage**: All blocking work via `await ctx.executor.run_in_thread(fn, *args)`
+
+## Artifact Management
+
+### Design Goals
+- **Zero external dependencies** beyond standard library + `pandas ≥ 2`, `dask[dataframe] ≥ 2024.4`, `pyarrow`
+- **Single file < 300 LOC** with rich type hints and clear documentation
+- **Thread-safe** for CPython GIL + ThreadPoolExecutor environment
+- **In-memory or local-disk Parquet** only (future backends will be added later)
+- **No metaclass tricks or global registries** - clarity over cleverness
+
+### Public API
+
+#### DataArtifact Protocol
+```python
+class DataArtifact(Protocol):
+    """Opaque handle to tabular data with materialization helpers."""
+    
+    def to_pandas(self) -> pd.DataFrame: ...
+    def to_dask(self) -> dd.DataFrame: ...
+    
+    @property
+    def n_rows(self) -> int: ...
+    
+    @property  
+    def uri(self) -> str: ...
+```
+
+#### ArtifactManager
+```python
+class ArtifactManager:
+    """Policy-driven store/fetch wrapper."""
+    
+    def __init__(self, 
+                 spill_threshold_rows: int = 25_000_000,
+                 max_ram_share: float = 0.5,
+                 spill_dir: Optional[Path] = None):
+        ...
+    
+    def store(self, obj: pd.DataFrame | dd.DataFrame) -> DataArtifact:
+        """Choose RAM vs Parquet and return an artifact."""
+        
+    def adopt(self, art: DataArtifact) -> DataArtifact:
+        """Return art unchanged; helper for symmetric caller code."""
+```
+
+### Artifact Implementations
+
+#### MemoryArtifact
+- **Purpose**: Hold Pandas or Dask object entirely in RAM
+- **Key Methods**: 
+  - `to_pandas()` returns internal object or converts via `ddf.compute()`
+  - `to_dask()` converts pandas to dask or returns internal dask object
+
+#### ParquetArtifact  
+- **Purpose**: Persist object to single local Parquet file under `/tmp`
+- **Key Methods**:
+  - `write()` class method used by ArtifactManager.store
+  - `to_pandas()` reads from parquet file
+  - `to_dask()` reads as dask dataframe
+- **Storage**: Uses `tempfile.mkdtemp(prefix="pypeline_")` for spill directory
+
+### Storage Policy
+1. **For Dask DataFrames**:
+   - Estimate rows via `ddf.size // len(ddf.columns)`
+   - If rows ≤ spill_threshold_rows AND RSS < max_ram_share → MemoryArtifact
+   - Else → ParquetArtifact
+
+2. **For Pandas DataFrames**:
+   - Same row and RAM checks
+   - Above limits → ParquetArtifact, else → MemoryArtifact
+
+3. **Logging**: INFO level for "spill to parquet at ..." events
+
+### Future Extensions
+- Distributed Dask support
+- S3, Snowflake, Arrow Flight backends  
+- Cleanup daemon for temporary files
+- Complex permission/encryption logic
+
+## Build System
+
+### Input YAML Schema
+[Refer to existing flow.schema.json for complete schema]
+
+Key sections:
+- **flow**: Metadata (name, version, authors, created)
+- **settings**: Execution configuration (timeout, retries, fail_strategy, execution_mode)
+- **modules**: Component definitions with configs
+- **connections**: Lines (data flow) and pypes (control flow)
+
+### Build Output Structure
+```
+jobs/
+└── my_etl_job/
+    ├── my_etl_job.yaml                    # Original YAML
+    ├── my_etl_job_dag.json                # Nodes with full metadata embedded
+    ├── my_etl_job_execution_metadata.json # Runtime settings, pod boundaries, execution order
+    └── context/
+        └── my_etl_job_default.json        # Environment context variables
+```
+
+### Build Command
+```bash
+pype build flow.yaml
+```
+
+## Validation Framework
+
+### Distributed Validation
+- **build/load/**: YAML structure, schema compliance
+- **build/plan/**: Connections, topology, circular dependencies
+- **run/execute**: Runtime constraints
+- Each module validates its own concerns
+
+### Validation Responsibilities
+- **Load Phase**: YAML syntax, schema validation, module existence
+- **Plan Phase**: Connection validity, DAG construction, pod boundary detection
+- **Runtime**: Resource constraints, execution prerequisites
+
+## Checkpointing Strategy
+
+### Pod-Level Checkpointing
+- **Frequency**: After successful completion of each pod
+- **Format**: Parquet files for data state
+- **Resume**: Continue from next pod in execution order
+- **Storage**: Job folder with checkpoint metadata
+
+### Memory Management
+- **Checkpoint Flushing**: Periodic flush of checkpoint data to prevent memory accumulation
+- **Job Completion**: Full flush of all checkpoints and temporary data when job completes
+- **Resource Cleanup**: Automatic cleanup of checkpoint artifacts and temporary files
+
+## Logging and Observability
+
+### JSON Logging (v1)
+- **Format**: Structured JSON logs
+- **Context**: Automatic node_id tagging
+- **Levels**: DEBUG, INFO, WARN, ERROR
+- **Output**: Configurable destinations
+
+## CLI Interface
+
+### Core Commands
+```bash
+# Registry management
+pype register-module <module_name>
+pype clear-registry
+pype auto-register
+
+# Build and execution
+pype build <flow.yaml>
+pype run <job_folder>
+
+# Utilities
+pype validate <flow.yaml>
+pype list-modules
+```
+
+## Development Guidelines
+
+### Code Organization
+- **File Size**: ≤200 LOC per file
+- **Separation of Concerns**: Clear module boundaries
+- **Async-First**: All I/O operations use asyncio
+- **Type Hints**: Full type annotation coverage
+- **Error Handling**: Graceful failure with proper cleanup
+
+### Extension Points
+- **New Module Types**: Extend BaseModule, register in appropriate folder
+- **Custom Validators**: Add to respective build phase folders
+- **Storage Backends**: Implement artifact storage interfaces
+- **Schedulers**: Future pluggable scheduler architecture
+
+## Future Roadmap
+
+### Version 2 Features
+- **Iterate Support**: Enhanced edge support with iteration
+- **Order 0 Support**: Parallel pod launching
+- **Multiple Same Order**: Parallel execution of same-priority pods
+
+### Version 3+ Features
+- **Sync Gates**: Advanced synchronization components
+- **External Schedulers**: Celery/Airflow integration
+- **Hot Reloading**: Development-time module reloading
+- **Distributed Execution**: Multi-node execution support
+
+## Configuration Examples
+
+### Sample Flow YAML
+```yaml
+flow:
+  name: sample_etl
+  version: 1.0.0
+  authors: ["developer"]
+  created: "2025-01-15"
+
+settings:
+  timeout: 3600
+  retries: 1
+  fail_strategy: halt
+  execution_mode: pandas
+  frame_engine: polars
+  threads: 8
+
+modules:
+  - id: source_csv
+    name: csv_tap
+    configs:
+      required:
+        file_path: "/data/input.csv"
+      optional:
+        encoding: "utf-8"
+
+  - id: transform_data
+    name: filter_mod
+    configs:
+      required:
+        condition: "age > 18"
+
+  - id: output_parquet
+    name: parquet_sink
+    configs:
+      required:
+        output_path: "/data/output.parquet"
+
+connections:
+  lines:
+    - "source_csv.data - transform_data.input"
+    - "transform_data.output - output_parquet.input"
+  pypes:
+    - "source_csv (1|) transform_data"
+    - "transform_data (2|) output_parquet"
+```
+
+## Error Handling Strategy
+
+### V1 Critical Failure Handling
+- **Module Failure**: Module handles its own retries internally (engine just calls `run()`)
+- **Pod Failure**: Halt or continue based on fail_strategy setting
+- **Checkpoint Resume**: Restart from last successful pod for ANY runtime failure
+- **Resource Cleanup**: Automatic cleanup of temporary artifacts and resources
+
+### V1 Pluggable (Future Enhancement)
+- **Resource Exhaustion**: Graceful degradation (artifact spilling provides basic coverage)
+- **Network Issues**: Module-specific retry logic (exponential backoff, circuit breakers)
+- **Partial Rollback**: Undo incomplete pod operations (complex transaction semantics)
+- **Error Propagation**: Enhanced error context through call stack (basic logging covers v1)
+
+---
+
+*This specification serves as the living document for PYpeline v1 development and will be updated as implementation progresses.*
