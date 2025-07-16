@@ -1,3 +1,0 @@
-"""
-DataPY Components Package.
-"""
