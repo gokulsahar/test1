@@ -10,26 +10,15 @@ in which control flows
 
 Pypes will have Valves with control settings (order: condition)
 
-
-
-
 Control always flows to the most priority pypes firstl priority is carry forwarded to the lower pypes(priority DFS) 
-
-
 
 Modules - Does one logical work
 
-
-
 In our framework any Module one of the below 4 catagories:
-
-
-
 
 Module               Line                    Pype 
 
-
-Tanks             No In no Out          yes in yes out
+Tanks(lonePods)   No In no Out          yes in yes out
 Taps(source)      No In only Out        yes in yes out
 Sink(sinks)       Yes In No out         no In Yes out
 Mods(transform)   yes In  Yes Out       No in No out
@@ -43,15 +32,11 @@ Pods are interlinkes via pypes connected to the modules inside them
 
 
 pods together forms a flows
-
-
-
 There cannot be a isolated pod inside a flow
+lines have 0.5 as order (when a pod starst data processign it cannot be stopped by anything else)
 
-lines have 0.5 as order
-
-v1:: only (order:condition)
-v2:: iterate support (either as a control module or pype like (order:iterate)
+v1:: only (order|condition)
+v2:: iterate support edge support (order|iterate)
 v3:: Order 0 support (Similar to On componet ok, starts the nest pod immidietly in parallel)
 v4 :: support for 2 order with same value, both of those pods will be launched in parallel
 v4:: new sync gates componets other advance stuff
