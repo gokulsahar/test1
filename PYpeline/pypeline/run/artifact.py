@@ -5,8 +5,12 @@ PYpeline Artifact Manager - Lightweight data location registry
 import tempfile
 import psutil
 import logging
+import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Protocol, Union, Dict, Any, Optional
+from collections import deque
 
 try:
     import pandas as pd
@@ -31,14 +35,15 @@ class DataArtifact(Protocol):
 class MemoryArtifact:
     """Holds reference to in-memory data"""
     
-    def __init__(self, data: Union[pd.DataFrame, dd.DataFrame]):
+    def __init__(self, data: Union[pd.DataFrame, dd.DataFrame], estimated_rows: Optional[int] = None):
         self._data = data
         self._uri = f"memory://{id(data)}"
+        self._estimated_rows = estimated_rows
     
     def to_pandas(self, **kwargs) -> pd.DataFrame:
         data_type = type(self._data).__name__
         
-        if data_type == "DataFrame" and hasattr(self._data, 'iloc'):  # pandas
+        if hasattr(self._data, 'iloc'):  # pandas
             return self._data
         elif hasattr(self._data, 'compute'):  # dask or similar lazy frameworks
             return self._data.compute()
@@ -50,7 +55,7 @@ class MemoryArtifact:
         
         if data_type in ("DataFrame", "Series") and hasattr(self._data, 'iloc'):  # pandas
             return dd.from_pandas(self._data, npartitions=1)
-        elif hasattr(self._data, 'repartition'):  # dask
+        elif hasattr(self._data, 'repartition') or 'dask' in str(type(self._data)):  # dask
             return self._data
         else:
             raise NotImplementedError(f"to_dask not implemented for {data_type}")
@@ -61,42 +66,77 @@ class MemoryArtifact:
     
     @property
     def n_rows(self) -> int:
-        if isinstance(self._data, pd.DataFrame):
+        if self._estimated_rows is not None:
+            return self._estimated_rows
+        
+        if hasattr(self._data, 'iloc'):  # pandas
             return len(self._data)
-        return len(self._data.compute())
+        elif hasattr(self._data, 'compute'):  # dask - expensive fallback
+            return len(self._data.compute())
+        else:
+            return 0
 
 
 class ParquetArtifact:
-    """Points to parquet file on disk"""
+    """Points to parquet file/directory on disk"""
     
-    def __init__(self, file_path: Path, n_rows: int):
+    def __init__(self, file_path: Path, n_rows: int, is_directory: bool = False):
         self.file_path = file_path
         self._n_rows = n_rows
-        self._uri = f"parquet://{file_path}"
+        self.is_directory = is_directory
+        
+        if is_directory:
+            self._uri = f"parquet_dir://{file_path}"
+        else:
+            self._uri = f"parquet://{file_path}"
     
     @classmethod
     def write(cls, data: Union[pd.DataFrame, dd.DataFrame], spill_dir: Path) -> "ParquetArtifact":
-        temp_file = tempfile.NamedTemporaryFile(
-            suffix=".parquet", dir=spill_dir, delete=False
-        )
-        file_path = Path(temp_file.name)
-        temp_file.close()
-        
-        if isinstance(data, pd.DataFrame):
-            data.to_parquet(file_path, index=False)
-            n_rows = len(data)
-        else:  # dask
-            data.to_parquet(file_path, index=False)
-            n_rows = len(data.compute())
-        
-        logger.info(f"Spilled {n_rows} rows to {file_path}")
-        return cls(file_path, n_rows)
+        try:
+            if isinstance(data, pd.DataFrame):
+                # Single file for pandas
+                temp_file = tempfile.NamedTemporaryFile(
+                    suffix=".parquet", dir=spill_dir, delete=False
+                )
+                file_path = Path(temp_file.name)
+                temp_file.close()
+                
+                data.to_parquet(file_path, index=False)
+                n_rows = len(data)
+                is_directory = False
+                
+            else:  # dask
+                # For dask, create a directory path that doesn't exist yet
+                temp_dir_name = f"dask_{int(time.time() * 1000000)}_parquet"
+                file_path = spill_dir / temp_dir_name
+                
+                # Dask will create the directory and write partition files
+                data.to_parquet(str(file_path), write_index=False)
+                
+                # Estimate rows without full compute
+                n_rows = max(1, int(data.size // len(data.columns))) if len(data.columns) > 0 else 0
+                is_directory = True
+            
+            logger.info(f"Spilled ~{n_rows} rows to {file_path}")
+            return cls(file_path, n_rows, is_directory)
+            
+        except Exception as e:
+            logger.error(f"Failed to write parquet: {e}")
+            raise
     
     def to_pandas(self, **kwargs) -> pd.DataFrame:
-        return pd.read_parquet(self.file_path, **kwargs)
+        try:
+            return pd.read_parquet(self.file_path, **kwargs)
+        except Exception as e:
+            logger.error(f"Failed to read parquet as pandas: {e}")
+            raise
     
     def to_dask(self, **kwargs) -> dd.DataFrame:
-        return dd.read_parquet(self.file_path, **kwargs)
+        try:
+            return dd.read_parquet(self.file_path, **kwargs)
+        except Exception as e:
+            logger.error(f"Failed to read parquet as dask: {e}")
+            raise
     
     @property
     def uri(self) -> str:
@@ -107,8 +147,14 @@ class ParquetArtifact:
         return self._n_rows
     
     def cleanup(self):
-        if self.file_path.exists():
-            self.file_path.unlink()
+        try:
+            if self.file_path.exists():
+                if self.is_directory:
+                    shutil.rmtree(self.file_path, ignore_errors=True)
+                else:
+                    self.file_path.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to cleanup artifact {self.file_path}: {e}")
 
 
 class ArtifactManager:
@@ -119,7 +165,9 @@ class ArtifactManager:
         defaults = {
             "spill_threshold_rows": 1_000_000,
             "max_ram_share": 0.7,
-            "spill_dir": None
+            "spill_dir": None,
+            "memory_check_interval": 10,  # Check memory pressure every N registrations
+            "enable_thread_safety": True
         }
         
         # Merge with user config
@@ -128,73 +176,133 @@ class ArtifactManager:
         
         self.spill_threshold_rows = final_config["spill_threshold_rows"]
         self.max_ram_share = final_config["max_ram_share"]
-        self.spill_dir = final_config["spill_dir"] or Path(tempfile.mkdtemp(prefix="pypeline_"))
+        self.memory_check_interval = final_config["memory_check_interval"]
+        self.enable_thread_safety = final_config["enable_thread_safety"]
         
+        self.spill_dir = final_config["spill_dir"] or Path(tempfile.mkdtemp(prefix="pypeline_"))
         if isinstance(self.spill_dir, str):
             self.spill_dir = Path(self.spill_dir)
         
         self.spill_dir.mkdir(exist_ok=True)
-        self._artifacts = []
+        
+        # Thread-safe artifact tracking
+        if self.enable_thread_safety:
+            self._artifacts = deque()
+            self._lock = threading.RLock()
+        else:
+            self._artifacts = []
+            self._lock = None
+        
+        # Memory pressure optimization
+        self._memory_pressure_cache = False
+        self._last_memory_check = 0
+        self._registration_count = 0
     
     def register(self, data: Union[pd.DataFrame, dd.DataFrame], hint: Optional[str] = None) -> DataArtifact:
         """Register data and return artifact handle"""
         
-        # Estimate size
-        if isinstance(data, pd.DataFrame):
-            n_rows = len(data)
-        else:  # dask
-            n_rows = data.map_partitions(len).sum().compute()
-        
-        # Decide storage
-        should_spill = (
-            hint == "force_disk" or
-            n_rows > self.spill_threshold_rows or
-            self._memory_pressure()
-        )
-        
-        if should_spill:
-            artifact = ParquetArtifact.write(data, self.spill_dir)
-        else:
-            artifact = MemoryArtifact(data)
-        
-        self._artifacts.append(artifact)
-        return artifact
+        with self._lock if self._lock else self._null_context():
+            self._registration_count += 1
+            
+            # Estimate size efficiently
+            n_rows = self._estimate_rows(data)
+            
+            # Decide storage with batched memory checks
+            should_spill = (
+                hint == "force_disk" or
+                n_rows > self.spill_threshold_rows or
+                self._should_check_memory_pressure()
+            )
+            
+            if should_spill:
+                try:
+                    artifact = ParquetArtifact.write(data, self.spill_dir)
+                except Exception as e:
+                    logger.warning(f"Parquet write failed, falling back to memory: {e}")
+                    artifact = MemoryArtifact(data, n_rows)
+            else:
+                artifact = MemoryArtifact(data, n_rows)
+            
+            self._artifacts.append(artifact)
+            return artifact
     
     def adopt(self, artifact: DataArtifact) -> DataArtifact:
         """Track existing artifact"""
-        if artifact not in self._artifacts:
-            self._artifacts.append(artifact)
-        return artifact
+        with self._lock if self._lock else self._null_context():
+            if artifact not in self._artifacts:
+                self._artifacts.append(artifact)
+            return artifact
     
     def cleanup_all(self):
-        """Remove all spilled files"""
-        for artifact in self._artifacts:
-            if hasattr(artifact, 'cleanup'):
-                artifact.cleanup()
-        self._artifacts.clear()
-        
-        if self.spill_dir.exists():
-            try:
-                self.spill_dir.rmdir()
-            except OSError:
-                pass
+        """Remove all spilled files and cleanup directory"""
+        with self._lock if self._lock else self._null_context():
+            # Cleanup all artifacts
+            for artifact in list(self._artifacts):
+                if hasattr(artifact, 'cleanup'):
+                    artifact.cleanup()
+            
+            self._artifacts.clear()
+            
+            # Robust directory cleanup
+            if self.spill_dir.exists():
+                try:
+                    shutil.rmtree(self.spill_dir, ignore_errors=True)
+                    logger.debug(f"Cleaned up spill directory: {self.spill_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup spill directory: {e}")
     
-    def _memory_pressure(self) -> bool:
-        """Check if system memory usage is high"""
-        memory = psutil.virtual_memory()
-        return memory.percent / 100 > self.max_ram_share
+    def _estimate_rows(self, data: Union[pd.DataFrame, dd.DataFrame]) -> int:
+        """Efficiently estimate row count without expensive operations"""
+        try:
+            if isinstance(data, pd.DataFrame):
+                return len(data)
+            else:  # dask
+                # Simple estimation based on partitions
+                if hasattr(data, 'npartitions'):
+                    # Rough estimate: assume 10k rows per partition
+                    return data.npartitions * 10000
+                else:
+                    return 1000  # conservative fallback
+        except Exception:
+            return 1000  # conservative fallback
+    
+    def _should_check_memory_pressure(self) -> bool:
+        """Batched memory pressure checking to reduce psutil overhead"""
+        current_time = time.time()
+        
+        # Check memory every N registrations or every few seconds
+        if (self._registration_count % self.memory_check_interval == 0 or 
+            current_time - self._last_memory_check > 5.0):
+            
+            try:
+                memory = psutil.virtual_memory()
+                self._memory_pressure_cache = memory.percent / 100 > self.max_ram_share
+                self._last_memory_check = current_time
+            except Exception:
+                # Fallback if psutil unavailable
+                self._memory_pressure_cache = False
+        
+        return self._memory_pressure_cache
+    
+    def _null_context(self):
+        """No-op context manager for when thread safety is disabled"""
+        from contextlib import nullcontext
+        return nullcontext()
     
     def stats(self) -> Dict[str, Any]:
         """Get manager statistics"""
-        memory_count = sum(1 for a in self._artifacts if isinstance(a, MemoryArtifact))
-        parquet_count = len(self._artifacts) - memory_count
-        
-        return {
-            "total_artifacts": len(self._artifacts),
-            "memory_artifacts": memory_count,
-            "parquet_artifacts": parquet_count,
-            "spill_dir": str(self.spill_dir)
-        }
+        with self._lock if self._lock else self._null_context():
+            memory_count = sum(1 for a in self._artifacts if isinstance(a, MemoryArtifact))
+            parquet_count = len(self._artifacts) - memory_count
+            
+            return {
+                "total_artifacts": len(self._artifacts),
+                "memory_artifacts": memory_count,
+                "parquet_artifacts": parquet_count,
+                "spill_dir": str(self.spill_dir),
+                "registration_count": self._registration_count,
+                "last_memory_pressure": self._memory_pressure_cache
+            }
 
 
 # Factory function
