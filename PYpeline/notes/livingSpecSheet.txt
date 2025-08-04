@@ -12,20 +12,20 @@ PYpeline is a Python-based ETL job builder and runner designed to be cloud-agnos
 ## Core Terminologies
 
 ### Data Flow Concepts
-- **Line**: Data flows through lines between modules
-- **Pype**: Control flows through pypes with valve settings
+- **Data flow**: Data flows through data connections between modules
+- **Control flow**: Control flows through control connections with valve settings
 - **Valve**: Control settings in format `(order|condition)` 
-- **Module**: Does one logical unit of work
-- **Pod**: Logical boundaries formed around modules; connected via pypes
-- **Flow**: Complete ETL job composed of interconnected pods
+- **Module(Mod)**: Does one logical unit of work
+- **Sub flow**: Logical boundaries formed around modules; connected via control connections
+- **Flow**: Complete ETL job composed of interconnected sub flows
 
 ### Module Categories
 
-| Module Type | Line In/Out | Pype In/Out | Purpose |
+| Module Type | Data In/Out | Control In/Out | Purpose |
 |-------------|-------------|-------------|---------|
-| **Tanks** (lonePods) | No In, No Out | Yes In, Yes Out | Standalone processing |
-| **Taps** (sources) | No In, Only Out | Yes In, Yes Out | Data sources |
-| **Sinks** | Yes In, No Out | No In, Yes Out | Data destinations |
+| **Solo Mods** (lone Sub flow) | No In, No Out | Yes In, Yes Out | Standalone processing |
+| **Source Mods** (sources) | No In, Only Out | Yes In, Yes Out | Data sources |
+| **Sink Mods** | Yes In, No Out | No In, Yes Out | Data destinations |
 | **Mods** (transforms) | Yes In, Yes Out | No In, No Out | Data transformations |
 
 ## Project Structure
@@ -39,7 +39,7 @@ pypeline/
 ├── modules/
 │   ├── __init__.py
 │   ├── ModRegistry.json            # Component registry
-│   ├── taps/, mods/, sinks/, tanks/ # Component folders
+│   ├── source/, mods/, sinks/, solo/ # Component folders
 │   ├── sdk/
 │   │   ├── __init__.py
 │   │   └── base.py                 # BaseModule class
@@ -95,7 +95,7 @@ This pattern provides:
 ### Control Flow Rules
 - **Priority-DFS**: Depth-first search with ascending valve order
 - **Special Orders**:
-  - `order: 0` - Data edges (internal use only, immediate flow within pods)
+  - `order: 0` - Data edges (internal use only, immediate flow within sub flows)
   - `order: 1..N` - User-defined priority control execution
   - `order: Last` - Replaced at build time with max(order)+1
 - **User Constraints**: Users can only specify orders 1 and above; order 0 is reserved for internal data flow
@@ -113,7 +113,7 @@ This pattern provides:
 - **Execution Flow**: DFS dives into scope[0], unwinds, increments index until list is exhausted
 
 ### Data Execution Waves
-Inside each pod, pure-data sub-graphs are executed by:
+Inside each sub flow, pure-data sub-graphs are executed by:
 ```python
 async def topo_waves(graph, ctx):
     while ready_nodes:
@@ -127,7 +127,7 @@ async def topo_waves(graph, ctx):
 ```python
 class BaseModule:
     # Required class attributes
-    TYPE: str = "unknown"           # tap, mod, sink, tank
+    TYPE: str = "unknown"           # source, mod, sink, solo
     VERSION: str = "1.0.0"
     DESCRIPTION: str = ""
     CATEGORY: str = "unknown"       # UI grouping
@@ -135,7 +135,6 @@ class BaseModule:
     OUTPUT_PORTS: List[str] = []
     GLOBALS: List[str] = []         # Variables this module generates
     PACKAGES: List[str] = []        # Third-party dependencies
-    FRAME_OVERRIDE: str = None      # Optional: "pandas", "polars", "dask" override
     
     CONFIG_SCHEMA: Dict[str, Any] = {
         "required": {},  # param_name: {"type": "str", "description": "..."}
@@ -157,18 +156,12 @@ class BaseModule:
         pass
 ```
 
-### Frame Engine Policy
-- **Flow-level default**: Set in YAML `settings.frame_engine` (pandas/polars/dask)
-- **Module override**: Optional `FRAME_OVERRIDE` class attribute for specific needs
-- **No magic conversions**: ArtifactManager stores/returns requested frame type
-- **Scheduler responsibility**: Check `getattr(mod_cls, "FRAME_OVERRIDE", ctx.default_engine)` for frame selection
-
 ### Module Registry Structure
 ```json
 {
-  "csv_tap": {
-    "module_path": "pypeline.modules.taps.csv_tap",
-    "type": "tap",
+  "csv_source": {
+    "module_path": "pypeline.modules.source.csv_source",
+    "type": "source",
     "version": "1.0.0",
     "description": "Reads data from CSV files",
     "category": "File Sources",
@@ -196,7 +189,7 @@ class BaseModule:
 ### Registration Commands
 ```bash
 # Register single module
-pype register-module csv_tap
+pype register-module csv_source
 
 # Clear registry
 pype clear-registry
@@ -285,13 +278,10 @@ class DataArtifact(Protocol):
 class ArtifactManager:
     """Policy-driven store/fetch wrapper."""
     
-    def __init__(self, 
-                 spill_threshold_rows: int = 25_000_000,
-                 max_ram_share: float = 0.5,
-                 spill_dir: Optional[Path] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         ...
     
-    def store(self, obj: pd.DataFrame | dd.DataFrame) -> DataArtifact:
+    def register(self, obj: pd.DataFrame | dd.DataFrame) -> DataArtifact:
         """Choose RAM vs Parquet and return an artifact."""
         
     def adopt(self, art: DataArtifact) -> DataArtifact:
@@ -309,7 +299,7 @@ class ArtifactManager:
 #### ParquetArtifact  
 - **Purpose**: Persist object to single local Parquet file under `/tmp`
 - **Key Methods**:
-  - `write()` class method used by ArtifactManager.store
+  - `write()` class method used by ArtifactManager.register
   - `to_pandas()` reads from parquet file
   - `to_dask()` reads as dask dataframe
 - **Storage**: Uses `tempfile.mkdtemp(prefix="pypeline_")` for spill directory
@@ -341,7 +331,7 @@ Key sections:
 - **flow**: Metadata (name, version, authors, created)
 - **settings**: Execution configuration (timeout, retries, fail_strategy, execution_mode)
 - **modules**: Component definitions with configs
-- **connections**: Lines (data flow) and pypes (control flow)
+- **connections**: Data connections (data flow) and control connections (control flow)
 
 ### Build Output Structure
 ```
@@ -349,7 +339,7 @@ jobs/
 └── my_etl_job/
     ├── my_etl_job.yaml                    # Original YAML
     ├── my_etl_job_dag.json                # Nodes with full metadata embedded
-    ├── my_etl_job_execution_metadata.json # Runtime settings, pod boundaries, execution order
+    ├── my_etl_job_execution_metadata.json # Runtime settings, sub flow boundaries, execution order
     └── context/
         └── my_etl_job_default.json        # Environment context variables
 ```
@@ -369,15 +359,15 @@ pype build flow.yaml
 
 ### Validation Responsibilities
 - **Load Phase**: YAML syntax, schema validation, module existence
-- **Plan Phase**: Connection validity, DAG construction, pod boundary detection
+- **Plan Phase**: Connection validity, DAG construction, sub flow boundary detection
 - **Runtime**: Resource constraints, execution prerequisites
 
 ## Checkpointing Strategy
 
-### Pod-Level Checkpointing
-- **Frequency**: After successful completion of each pod
+### Sub Flow-Level Checkpointing
+- **Frequency**: After successful completion of each sub flow
 - **Format**: Parquet files for data state
-- **Resume**: Continue from next pod in execution order
+- **Resume**: Continue from next sub flow in execution order
 - **Storage**: Job folder with checkpoint metadata
 
 ### Memory Management
@@ -430,8 +420,8 @@ pype list-modules
 
 ### Version 2 Features
 - **Iterate Support**: Enhanced edge support with iteration
-- **Order 0 Support**: Parallel pod launching
-- **Multiple Same Order**: Parallel execution of same-priority pods
+- **Order 0 Support**: Parallel sub flow launching
+- **Multiple Same Order**: Parallel execution of same-priority sub flows
 
 ### Version 3+ Features
 - **Sync Gates**: Advanced synchronization components
@@ -454,12 +444,11 @@ settings:
   retries: 1
   fail_strategy: halt
   execution_mode: pandas
-  frame_engine: polars
   threads: 8
 
 modules:
   - id: source_csv
-    name: csv_tap
+    name: csv_source
     configs:
       required:
         file_path: "/data/input.csv"
@@ -479,10 +468,10 @@ modules:
         output_path: "/data/output.parquet"
 
 connections:
-  lines:
+  data:
     - "source_csv.data - transform_data.input"
     - "transform_data.output - output_parquet.input"
-  pypes:
+  control:
     - "source_csv (1|) transform_data"
     - "transform_data (2|) output_parquet"
 ```
@@ -491,14 +480,14 @@ connections:
 
 ### V1 Critical Failure Handling
 - **Module Failure**: Module handles its own retries internally (engine just calls `run()`)
-- **Pod Failure**: Halt or continue based on fail_strategy setting
-- **Checkpoint Resume**: Restart from last successful pod for ANY runtime failure
+- **Sub Flow Failure**: Halt or continue based on fail_strategy setting
+- **Checkpoint Resume**: Restart from last successful sub flow for ANY runtime failure
 - **Resource Cleanup**: Automatic cleanup of temporary artifacts and resources
 
 ### V1 Pluggable (Future Enhancement)
 - **Resource Exhaustion**: Graceful degradation (artifact spilling provides basic coverage)
 - **Network Issues**: Module-specific retry logic (exponential backoff, circuit breakers)
-- **Partial Rollback**: Undo incomplete pod operations (complex transaction semantics)
+- **Partial Rollback**: Undo incomplete sub flow operations (complex transaction semantics)
 - **Error Propagation**: Enhanced error context through call stack (basic logging covers v1)
 
 ---
